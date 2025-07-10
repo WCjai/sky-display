@@ -1,6 +1,15 @@
 {
-    "idf.port": "/dev/ttyUSB0",
+    "idf.port": "/dev/ttyUSB1",
     "idf.openOcdConfigs": [
         "board/esp32-bridge.cfg"
-    ]
+    ],
+    "files.associations": {
+        "array": "cpp",
+        "functional": "cpp",
+        "istream": "cpp",
+        "ostream": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp"
+    }
 }

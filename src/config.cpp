@@ -16,144 +16,369 @@ String TZ;
 int TZ_minutes;
 bool USE_24H = true;
 
+// const char* form_html = R"rawliteral(
+// <!DOCTYPE HTML>
+// <html lang="en">
+// <head>
+//   <meta charset="UTF-8">
+//   <meta name="viewport" content="width=device-width, initial-scale=1">
+//   <title>Sky Display Configurator</title>
+//   <style>
+//     body {
+//       margin: 0;
+//       padding: 0;
+//       font-family: Arial, sans-serif;
+//       background: linear-gradient(to bottom, #87ceeb, #ffffff);
+//     }
+//     .header {
+//       background-color: #004466;
+//       color: #ffffff;
+//       padding: 20px;
+//       text-align: center;
+//     }
+//     .header .logo {
+//       font-size: 1.5em;
+//     }
+//     .container {
+//       max-width: 600px;
+//       margin: 40px auto;
+//       background-color: rgba(255,255,255,0.9);
+//       padding: 20px;
+//       border-radius: 8px;
+//       box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+//     }
+//     h2 {
+//       text-align: center;
+//       color: #004466;
+//     }
+//     .form-group {
+//       margin-bottom: 15px;
+//     }
+//     .form-group label {
+//       display: block;
+//       margin-bottom: 5px;
+//       font-weight: bold;
+//       color: #004466;
+//     }
+//     .form-group input,
+//     .form-group select {
+//       width: 100%;
+//       padding: 8px;
+//       border: 1px solid #cccccc;
+//       border-radius: 4px;
+//       font-size: 1em;
+//     }
+//     .checkbox-group {
+//       display: flex;
+//       align-items: center;
+//       margin-bottom: 15px;
+//     }
+//     .checkbox-group input {
+//       margin-right: 10px;
+//     }
+//     .btn {
+//       width: 100%;
+//       padding: 12px;
+//       background-color: #004466;
+//       color: #ffffff;
+//       border: none;
+//       border-radius: 4px;
+//       font-size: 1em;
+//       cursor: pointer;
+//     }
+//     .btn:hover {
+//       background-color: #003355;
+//     }
+//     .footer {
+//       text-align: center;
+//       margin-top: 20px;
+//       font-size: 0.9em;
+//       color: #666666;
+//     }
+//   </style>
+// </head>
+// <body>
+//   <div class="header">
+//     <div class="logo">Sky Display configurator</div>
+//   </div>
+//   <div class="container">
+//     <h2>Settings</h2>
+//     <form action="/save" method="POST">
+//       <div class="form-group">
+//         <label for="ssid">Wi-Fi SSID</label>
+//         <input id="ssid"  name="ssid" type="text"    value="{ssid}">
+//       </div>
+//       <div class="form-group">
+//         <label for="pass">Wi-Fi Password</label>
+//         <input id="pass"  name="pass" type="password" value="{pass}">
+//       </div>
+//       <div class="form-group">
+//         <label for="cid">Client ID</label>
+//         <input id="cid"   name="cid"  type="text"     value="{cid}">
+//       </div>
+//       <div class="form-group">
+//         <label for="csec">Client Secret</label>
+//         <input id="csec"  name="csec" type="text"     value="{csec}">
+//       </div>
+//       <div class="form-group">
+//         <label for="lat">Home Latitude</label>
+//         <input id="lat"   name="lat"  type="text"     value="{lat}">
+//       </div>
+//       <div class="form-group">
+//         <label for="lon">Home Longitude</label>
+//         <input id="lon"   name="lon"  type="text"     value="{lon}">
+//       </div>
+//       <div class="form-group">
+//         <label for="zoom">Map Zoom Level</label>
+//         <input id="zoom"  name="zoom" type="number" min="8" max="15" value="{zoom}">
+//         <small style="display:block; margin-top:8px; color:#004466;">
+//           <strong>Approximate Radius covered by Zoom:</strong><br>
+//           8 → 608 km, 9 → 417 km, 10 → 266 km, 11 → 186 km<br>
+//           12 → 100 km, 13 → 62 km, 14 → 31 km, 15 → 15 km
+          
+//         </small>
+//       </div>
+//       <div class="checkbox-group">
+//         <input id="use24h" name="use24h" type="checkbox" {use24h_checked}>
+//         <label for="use24h">Use 24-hour time</label>
+//       </div>
+//       <div class="form-group">
+//         <label for="tz">Timezone</label>
+//         <select id="tz" name="tz">
+//           {tz_options}
+//         </select>
+//       </div>
+//       <button type="submit" class="btn">Save Settings</button>
+//     </form>
+//         <div class="footer">
+//       Powered by
+//       <a href="https://opensky-network.org" target="_blank">OpenSky Network</a>
+//       &amp;
+//       <a href="https://www.planespotters.net" target="_blank">Planespotters</a>
+//     </div>
+//   </div>
+// </body>
+// </html>
+// )rawliteral";
+
 const char* form_html = R"rawliteral(
-<!DOCTYPE HTML>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flight Tracker Configuration</title>
+  <title>Sky Display Configurator</title>
   <style>
     body {
-      margin: 0;
-      padding: 0;
-      font-family: Arial, sans-serif;
-      background: linear-gradient(to bottom, #87ceeb, #ffffff);
-    }
-    .header {
-      background-color: #004466;
-      color: #ffffff;
+      font-family: "Segoe UI", Roboto, sans-serif;
+      background: #e6f0f8;
       padding: 20px;
-      text-align: center;
-    }
-    .header .logo {
-      font-size: 1.5em;
-    }
-    .container {
-      max-width: 600px;
-      margin: 40px auto;
-      background-color: rgba(255,255,255,0.9);
-      padding: 20px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      color: #002b45;
     }
     h2 {
       text-align: center;
-      color: #004466;
+      margin-bottom: 20px;
+      color: #003459;
+      font-weight: 600;
+      letter-spacing: 1px;
     }
-    .form-group {
-      margin-bottom: 15px;
+    form {
+      max-width: 640px;
+      margin: auto;
+      background: #ffffff;
+      padding: 24px;
+      border-radius: 10px;
+      box-shadow: 0 3px 12px rgba(0,0,0,0.1);
+      border-top: 6px solid #007BFF;
     }
-    .form-group label {
+    .section {
+      margin-bottom: 25px;
+    }
+    .section-title {
+      font-size: 18px;
+      font-weight: bold;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #ccc;
+      padding-bottom: 5px;
+      color: #004172;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 10px;
+    }
+    label {
+      font-weight: 600;
       display: block;
       margin-bottom: 5px;
-      font-weight: bold;
-      color: #004466;
+      color: #003459;
     }
-    .form-group input,
-    .form-group select {
-      width: 100%;
-      padding: 8px;
-      border: 1px solid #cccccc;
-      border-radius: 4px;
-      font-size: 1em;
+    input[type="text"],
+    input[type="password"],
+    input[type="number"],
+    select {
+      width: 90%;
+      padding: 7px 10px;
+      border: 1px solid #a0b9d6;
+      border-radius: 5px;
+      font-size: 14px;
+      background: #f8fbff;
     }
-    .checkbox-group {
+    .zoom-row {
       display: flex;
       align-items: center;
-      margin-bottom: 15px;
+      gap: 10px;
+      margin-top: 10px;
     }
-    .checkbox-group input {
-      margin-right: 10px;
+    .info-button {
+      background-color: #007BFF;
+      color: white;
+      border: none;
+      border-radius: 50%;
+      width: 22px;
+      height: 22px;
+      cursor: pointer;
+      font-weight: bold;
+      text-align: center;
+      line-height: 20px;
     }
-    .btn {
+    .info-box {
+      display: none;
+      font-size: 13px;
+      margin-top: 8px;
+      background: #eef6ff;
+      padding: 10px;
+      border-radius: 5px;
+      border-left: 3px solid #007BFF;
+    }
+    .toggle-visible {
+      display: block !important;
+    }
+    .time-row {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      margin-top: 10px;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .checkbox-row input[type="checkbox"] {
+      margin: 0;
+      transform: scale(1.2);
+    }
+    .submit-btn {
+      display: block;
       width: 100%;
       padding: 12px;
-      background-color: #004466;
-      color: #ffffff;
+      font-size: 16px;
+      background: #007BFF;
+      color: white;
       border: none;
-      border-radius: 4px;
-      font-size: 1em;
+      border-radius: 6px;
       cursor: pointer;
+      letter-spacing: 0.5px;
     }
-    .btn:hover {
-      background-color: #003355;
-    }
-    .footer {
-      text-align: center;
-      margin-top: 20px;
-      font-size: 0.9em;
-      color: #666666;
+    .submit-btn:hover {
+      background: #005ecb;
     }
   </style>
+  <script>
+    function toggleInfoBox() {
+      var box = document.getElementById('zoom-info');
+      box.classList.toggle('toggle-visible');
+    }
+  </script>
 </head>
 <body>
-  <div class="header">
-    <div class="logo">Flight display configuration</div>
-  </div>
-  <div class="container">
-    <h2>Settings</h2>
-    <form action="/save" method="POST">
-      <div class="form-group">
-        <label for="ssid">Wi-Fi SSID</label>
-        <input id="ssid"  name="ssid" type="text"    value="{ssid}">
+  <h2>🛫 Sky Display Configurator</h2>
+  <form action="/save" method="POST">
+
+    <div class="section">
+      <div class="section-title">WiFi Credentials</div>
+      <div class="row">
+        <div>
+          <label for="ssid">SSID</label>
+          <input type="text" name="ssid" id="ssid" value="{ssid}">
+        </div>
+        <div>
+          <label for="pass">Password</label>
+          <input type="text" name="pass" id="pass" value="{pass}">
+        </div>
       </div>
-      <div class="form-group">
-        <label for="pass">Wi-Fi Password</label>
-        <input id="pass"  name="pass" type="password" value="{pass}">
-      </div>
-      <div class="form-group">
-        <label for="cid">Client ID</label>
-        <input id="cid"   name="cid"  type="text"     value="{cid}">
-      </div>
-      <div class="form-group">
-        <label for="csec">Client Secret</label>
-        <input id="csec"  name="csec" type="text"     value="{csec}">
-      </div>
-      <div class="form-group">
-        <label for="lat">Home Latitude</label>
-        <input id="lat"   name="lat"  type="text"     value="{lat}">
-      </div>
-      <div class="form-group">
-        <label for="lon">Home Longitude</label>
-        <input id="lon"   name="lon"  type="text"     value="{lon}">
-      </div>
-      <div class="form-group">
-        <label for="zoom">Map Zoom Level</label>
-        <input id="zoom"  name="zoom" type="number"   min="8" max="15" value="{zoom}">
-      </div>
-      <div class="checkbox-group">
-        <input id="use24h" name="use24h" type="checkbox" {use24h_checked}>
-        <label for="use24h">Use 24-hour time</label>
-      </div>
-      <div class="form-group">
-        <label for="tz">Timezone</label>
-        <select id="tz" name="tz">
-          {tz_options}
-        </select>
-      </div>
-      <button type="submit" class="btn">Save Settings</button>
-    </form>
-        <div class="footer">
-      Powered by
-      <a href="https://opensky-network.org" target="_blank">OpenSky Network</a>
-      &amp;
-      <a href="https://www.planespotters.net" target="_blank">Planespotters</a>
     </div>
-  </div>
+
+    <div class="section">
+      <div class="section-title">OpenSky Network Credentials</div>
+      <div class="row">
+        <div>
+          <label for="cid">Client ID</label>
+          <input type="text" name="cid" id="cid" value="{cid}">
+        </div>
+        <div>
+          <label for="csec">Client Secret</label>
+          <input type="text" name="csec" id="csec" value="{csec}">
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Sky Location</div>
+      <div class="row">
+        <div>
+          <label for="lat">Latitude</label>
+          <input type="text" name="lat" id="lat" value="{lat}">
+        </div>
+        <div>
+          <label for="lon">Longitude</label>
+          <input type="text" name="lon" id="lon" value="{lon}">
+        </div>
+      </div>
+      <div class="zoom-row">
+        <div style="flex:1;">
+          <label for="zoom">Map Zoom</label>
+          <input type="number" name="zoom" id="zoom" value="{zoom}" min="8" max="15">
+          <button type="button" class="info-button" onclick="toggleInfoBox()">i</button>
+        </div>
+        
+      </div>
+      <div id="zoom-info" class="info-box">
+        <strong>Approximate Radius by Zoom:</strong><br>
+        Zoom 8 → 608 km<br>
+        Zoom 9 → 417 km<br>
+        Zoom 10 → 266 km<br>
+        Zoom 11 → 186 km<br>
+        Zoom 12 → 100 km<br>
+        Zoom 13 → 62 km<br>
+        Zoom 14 → 31 km<br>
+        Zoom 15 → 15 km
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Display time</div>
+      <div class="time-row">
+        <div style="flex:1;">
+          <label for="tz">Time Zone (minutes offset)</label>
+          <select id="tz" name="tz">{tz_options}</select>
+        </div>
+        <div class="checkbox-row" style="flex:1; margin-top: 26px;">
+          <input type="checkbox" name="use24h" id="use24h" {use24_checked}>
+          <label for="use24h">Use 24-hour format</label>
+        </div>
+      </div>
+    </div>
+
+    <button class="submit-btn" type="submit">Save Settings</button>
+  </form>
 </body>
 </html>
 )rawliteral";
+
+
+
 
 static const char* TZ_OFFSETS[] = {
   "-12:00","-11:00","-10:00","-09:30","-09:00","-08:00","-07:00","-06:00",
@@ -224,9 +449,53 @@ void handleSave() {
   prefs.putBool   ("use24h", USE_24H);
   prefs.end();
 
-  server.send(200, "text/html",
-    "<h2>Saved! Rebooting...</h2>"
-    "<script>setTimeout(()=>location.reload(),2000);</script>");
+  server.send(200, "text/html", R"rawliteral(
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Settings Saved</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Roboto, sans-serif;
+        background: #e6f0f8;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+        color: #003459;
+      }
+      .card {
+        background: #ffffff;
+        padding: 30px 40px;
+        border-radius: 10px;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.1);
+        text-align: center;
+        border-top: 6px solid #007BFF;
+      }
+      h2 {
+        font-size: 22px;
+        margin-bottom: 15px;
+      }
+      p {
+        font-size: 14px;
+        color: #555;
+      }
+    </style>
+    <script>
+      setTimeout(() => location.reload(), 2000);
+    </script>
+  </head>
+  <body>
+    <div class="card">
+      <h2>✅ Settings Saved</h2>
+      <p>Rebooting...</p>
+    </div>
+  </body>
+  </html>
+  )rawliteral");
+
 
   shouldReboot = true;
 }
@@ -246,7 +515,7 @@ void startConfigMode() {
   prefs.end();
 
   WiFi.mode(WIFI_AP);
-  WiFi.softAP("ESP_Config");
+  WiFi.softAP("WC_Sky_display");
   Serial.print("AP IP: "); Serial.println(WiFi.softAPIP());
 
   server.on("/", HTTP_GET, handleRoot);

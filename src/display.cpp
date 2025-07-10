@@ -8,7 +8,7 @@ Paint full_paint(full_image, 400, 300);
 
 unsigned char image[400 / 8 * 28];
 Paint paint(image, 400, 28);
-
+int scrollOffset = 0;
 void drawStatusScreen(const char* msg) {
     full_paint.Clear(UNCOLORED);
     epd.Init();
@@ -21,6 +21,32 @@ void drawStatusScreen(const char* msg) {
     int16_t y = (300 - h) / 2;
 
     full_paint.DrawStringAt(x, y, msg, font, COLORED);
+    epd.Display(full_paint.GetImage());
+}
+
+void drawStatusScreenwithline(const char* line1,
+                              const char* line2,
+                              const char* line3,
+                              const char* line4,
+                              const char* line5,
+                              const char* line6) {
+    full_paint.Clear(UNCOLORED);
+    epd.Init();
+    epd.Clear();
+
+    sFONT* font = &Font16;
+    int lineHeight = font->Height + 4;
+    int totalLines = 6;
+    int startY = (300 - (lineHeight * totalLines)) / 2;
+
+    const char* lines[] = {line1, line2, line3, line4, line5, line6};
+
+    for (int i = 0; i < totalLines; i++) {
+        if (strlen(lines[i]) > 0) {
+            full_paint.DrawStringAt(10, startY + i * lineHeight, lines[i], font, COLORED);
+        }
+    }
+
     epd.Display(full_paint.GetImage());
 }
 

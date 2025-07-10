@@ -29,7 +29,14 @@ void setup() {
   full_paint = Paint(full_image, 400, 300);
 
   if (digitalRead(BUTTON_PIN) == LOW) {
-    drawStatusScreen("Entering Config Mode");
+    drawStatusScreenwithline(
+      "Entered Configuration mode",
+      "-Connect to \"WC_Sky_display\" WiFi",
+      "-Enter \"192.168.4.1\" in browser",
+      " as URL, form connected device",
+      "-Configure the parameters and save",
+      "-Display will auto-refresh and boot"
+    );
     startConfigMode();
   }
 
