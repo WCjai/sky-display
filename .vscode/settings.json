@@ -1,0 +1,6 @@
+{
+    "idf.port": "/dev/ttyUSB0",
+    "idf.openOcdConfigs": [
+        "board/esp32-bridge.cfg"
+    ]
+}
