@@ -48,36 +48,28 @@ src/
 
 - Create an [OpenSky Network](https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/auth?response_type=code&client_id=website-ui&scope=openid&redirect_uri=https%3A%2F%2Fopensky-network.org%2Fredirect-uri&state=6946459d-6755-4361-887d-81976590974b) account 
 
-- ESP32 starts a Wi-Fi AP named `ESP_Config`.
-- Open a browser and visit `http://192.168.4.1`.
-- Fill in:
-  - Wi-Fi SSID & Password
-  - OpenSky Client ID & Secret
-  - Home Latitude, Longitude, Zoom level
-  - Timezone offset (e.g., +05:30) and 24h format
-- Settings are saved in non-volatile memory (Preferences).
+- Sign in to your account, then under `API Client` click `Create & Download Credential`.
+- credential file will be downloaded as `credentials.json`, in that your clientId	and clientSecret will be precent, keep this info for now we need it later.
 
-### 🚀 2. Normal Mode
+### 🚀 2. Firmware upload to ESP32
 
-- ESP32 connects to Wi-Fi using saved credentials.
-- Fetches a valid OAuth2 token from OpenSky.
-- Every 15 seconds:
-  - Fetches aircraft within a bounding box (based on home coordinates and zoom).
-  - For each aircraft:
-    - Fetches metadata from PlaneSpotters/OpenSky.
-    - Caches model, callsign, bearing, distance.
-- Updates e-paper display with aircraft info.
+- Download release ZIP, and extract them, inside you find Bootloader.bin, partition.bin and firmware.bin.
+- Go to [ESP online flasher](https://espressif.github.io/esptool-js/).
+- connect you ESP with the machine while holding the boot button of the esp, then on browser under 'program' click connect, a popup will appear choose the serial port the esp is connected and click connect on popup box again now the esp should be connected [note: if esp didnt connect, plug out the esp and then hold the boot button then plug back in keep holding the boot button till you get connected with esp]
+- by clicking on add file you can add files and choose the appiriate files as shown on the image, and click program this might take a while
 
-### 🖥 3. Display Modes
+### Hardware setup
+### 🖥 1. Wire connection
+- Connect Waveshare E-paper display with ESP
+- attach a config button to ESP's gpio 2
 
-- **No Aircraft Nearby:**
-  - Displays local time, date, and a message.
-  - Uses partial update (no flicker).
-
-- **Aircraft Nearby:**
-  - Displays up to 5 aircraft.
-  - Alternates entries using inverted color blocks.
-  - Shows time and aircraft count in the header.
+### Full setup
+- now that both hardware and software setup is done power on the ESP via USB or any prefered source
+- esp will automatically detect when there is no valid credentails and boots to config mode. [note: if ESP not in config mode, you can put esp in config mode manually by pressing the config button on gpio 2 when plugging in]
+- in config mode the ESP will give out open wifi named `WC_Sky_display` connect to the wifi
+- and enter this on the url of your brower `192.168.4.1` from the device connected to esp's wifi
+- config page will appear, enter your credentials including clientId	and clientSecret which we downloaded earlier
+- once done click save , the display will refresh and boot 
 
 ---
 
@@ -100,19 +92,17 @@ src/
 - **Partial updates** for normal refreshes (e.g., aircraft or time change).
 - **Full updates** only when switching between states (e.g., no aircraft → aircraft detected).
 
+- **No Aircraft Nearby:**
+  - Displays local time, date, and a message.
+  - Uses partial update (no flicker).
+
+- **Aircraft Nearby:**
+  - Displays up to 5 aircraft.
+  - Alternates entries using inverted color blocks.
+  - Shows time and aircraft count in the header.
 ---
 
 ## 🔧 Setup (PlatformIO)
 
 Your `platformio.ini` should look like:
 
-```ini
-[env:esp32dev]
-platform = espressif32
-board = esp32dev
-framework = arduino
-lib_deps =
-  bblanchon/ArduinoJson@^6.21.3
-  # Add e-paper display library here (e.g., GxEPD2 or Waveshare)
-build_flags =
-  -DCORE_DEBUG_LEVEL=3
