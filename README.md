@@ -125,5 +125,12 @@ Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown 
 
 ## 🔧 Development Setup (PlatformIO)
 
-User VScode with PlatformIO
+Use VScode with PlatformIO
+
+
+## ☕ Support Me
+
+If you found this project helpful or inspiring, consider supporting my work:
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-orange?logo=buy-me-a-coffee&logoColor=white&style=for-the-badge)](https://buymeacoffee.com/truecabbage)
 
