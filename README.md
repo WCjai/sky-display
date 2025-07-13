@@ -19,12 +19,13 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
 
 ## 🧱 Hardware Requirements
 
-| Component               | Notes                                 |
-|------------------------|----------------------------------------|
-| ESP32 Dev Board        | At least 4MB flash (any model)         |
-| Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              |
-| Pushbutton             | For entering Config Mode (GPIO 2)      |
-| Power Supply           | USB or LiPo battery (as preferred)     |
+| Component               | Notes                                 | Image & Buy Link |
+|------------------------|----------------------------------------|------------------|
+| ESP32 Dev Board        | At least 4MB flash (any model)         | ![ESP32](https://raw.githubusercontent.com/espressif/esp-faces/master/doc/esp32-devkitc-v4.png)<br>[Buy on Amazon](https://www.amazon.in/s?k=esp32+dev+board) |
+| Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              | ![EPD](https://www.waveshare.com/media/catalog/product/cache/1/image/600x/040ec09b1e35df139433887a97daa66f/e/p/epd4in2-v2-1.jpg)<br>[Buy on Waveshare](https://www.waveshare.com/4.2inch-e-paper-module.htm) |
+| Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](https://upload.wikimedia.org/wikipedia/commons/thumb/f/f7/Tactile_button_black.jpg/120px-Tactile_button_black.jpg)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
+| Power Supply           | USB or LiPo battery (as preferred)     | ![Power](https://cdn.sparkfun.com//assets/parts/1/1/7/7/13896-01.jpg)<br>[Buy LiPo](https://www.amazon.in/s?k=lipo+battery+esp32) |
+
 
 ---
 
