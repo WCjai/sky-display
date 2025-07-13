@@ -41,11 +41,13 @@ src/
 
 ---
 
-## ⚙️ How It Works
+## ⚙️ How to DIY
 
-### 🔧 1. Config Mode (On First Boot or Reset)
+### Software setup
+### 🔧 1. get Openskynet API credentials
 
-- Hold GPIO 2 LOW during boot to enter Config Mode.
+- Create an [OpenSky Network](https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/auth?response_type=code&client_id=website-ui&scope=openid&redirect_uri=https%3A%2F%2Fopensky-network.org%2Fredirect-uri&state=6946459d-6755-4361-887d-81976590974b) account 
+
 - ESP32 starts a Wi-Fi AP named `ESP_Config`.
 - Open a browser and visit `http://192.168.4.1`.
 - Fill in:
