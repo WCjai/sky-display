@@ -60,9 +60,25 @@ src/
 - by clicking on add file you can add files and choose the appiriate files as shown on the image, and click program this might take a while
 - <img src="images/esptools-bins.png" alt="Installation Image"/>
    
-### Hardware setup
-### 🖥 1. Wire connection
-- Connect Waveshare E-paper display with ESP
+### 🧱 Hardware Setup
+
+#### 🖥 1. Wire Connections
+
+Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown below:
+
+| ESP32 Pin | E-Paper Pin |
+|-----------|-------------|
+| 4         | BUSY        |
+| 16        | RST         |
+| 17        | DC          |
+| 5         | CS          |
+| 18        | CLK         |
+| 23        | DIN (MOSI)  |
+| 3.3V      | VCC         |
+| GND       | GND         |
+
+📌 **Note:** Make sure the e-paper module is powered via **3.3V**, not 5V — Waveshare `epd4in2_V2` is a 3.3V logic display. Incorrect voltage may damage the screen.
+
 - attach a config button to ESP's gpio 2
 
 ### Full setup
