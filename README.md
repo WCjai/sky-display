@@ -91,6 +91,8 @@ Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown 
 - config page will appear, enter your credentials including clientId	and clientSecret which we downloaded earlier
 - once done click save , the display will refresh and boot 
 
+
+
 ---
 
 ## 🧠 Key Features
