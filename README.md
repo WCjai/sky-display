@@ -17,16 +17,36 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
 
 ---
 
-## 🧱 Hardware Requirements
+---
 
-| Component               | Notes                                 | Image & Buy Link |
-|------------------------|----------------------------------------|------------------|
-| ESP32 Dev Board        | At least 4MB flash (any model)         | ![ESP32](images/cmbo.png)<br>[Buy](https://robu.in/product/esp32-wroom-32d-iot-development-doard-module-for-arduino/?gad_source=1&gad_campaignid=17413441824) |
-| Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              | ![EPD](images/noair.png)<br>[Buy](https://www.waveshare.com/4.2inch-e-paper-module.htm) |
-| Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](images/button.png)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
+## 🧠 Key Features
 
+### 🕒 Timezone-Aware Clock
 
+- Timezone offset is user-configured (e.g., `+05:30` → `+330` minutes).
+- Uses `strftime` for proper formatting after applying offset.
 
+### 🧠 Caching System
+
+- `AircraftCacheEntry[]` includes:
+  - `icao24`, `model`, `callsign`, `distance`, `bearing`, `active`
+- Ring buffer with 30 entries (cycled via `cacheIndex`).
+- Sorted by distance using `sortAircraftCacheByDistance()`.
+
+### 🖼 E-Paper Refresh Logic
+
+- **Partial updates** for normal refreshes (e.g., aircraft or time change).
+- **Full updates** only when switching between states (e.g., no aircraft → aircraft detected).
+
+- **No Aircraft Nearby:**
+  - Displays local time, date, and a message.
+  - Uses partial update (no flicker).
+
+- **Aircraft Nearby:**
+  - Displays up to 5 aircraft.
+  - Alternates entries using inverted color blocks.
+  - Shows time and aircraft count in the header.
+---
 ---
 
 ## 🗂 File Structure
@@ -41,6 +61,15 @@ src/
 ```
 
 ---
+
+## 🧱 Hardware Requirements
+
+| Component               | Notes                                 | Image & Buy Link |
+|------------------------|----------------------------------------|------------------|
+| ESP32 Dev Board        | At least 4MB flash (any model)         | ![ESP32](images/cmbo.png)<br>[Buy](https://robu.in/product/esp32-wroom-32d-iot-development-doard-module-for-arduino/?gad_source=1&gad_campaignid=17413441824) |
+| Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              | ![EPD](images/noair.png)<br>[Buy](https://www.waveshare.com/4.2inch-e-paper-module.htm) |
+| Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](images/button.png)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
+
 
 ## ⚙️ How to DIY
 
@@ -94,37 +123,6 @@ Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown 
 <img src="images/config.png"/>
 
 
-
----
-
-## 🧠 Key Features
-
-### 🕒 Timezone-Aware Clock
-
-- Timezone offset is user-configured (e.g., `+05:30` → `+330` minutes).
-- Uses `strftime` for proper formatting after applying offset.
-
-### 🧠 Caching System
-
-- `AircraftCacheEntry[]` includes:
-  - `icao24`, `model`, `callsign`, `distance`, `bearing`, `active`
-- Ring buffer with 30 entries (cycled via `cacheIndex`).
-- Sorted by distance using `sortAircraftCacheByDistance()`.
-
-### 🖼 E-Paper Refresh Logic
-
-- **Partial updates** for normal refreshes (e.g., aircraft or time change).
-- **Full updates** only when switching between states (e.g., no aircraft → aircraft detected).
-
-- **No Aircraft Nearby:**
-  - Displays local time, date, and a message.
-  - Uses partial update (no flicker).
-
-- **Aircraft Nearby:**
-  - Displays up to 5 aircraft.
-  - Alternates entries using inverted color blocks.
-  - Shows time and aircraft count in the header.
----
 
 ## 🔧 Setup (PlatformIO)
 
