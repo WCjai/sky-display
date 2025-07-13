@@ -15,7 +15,7 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
 - 📟 **Flicker-free partial updates on e-paper display**  
 - 🧠 **On-device caching** for up to 30 aircraft entries  
 
----
+
 
 ---
 
@@ -47,7 +47,6 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
   - Alternates entries using inverted color blocks.
   - Shows time and aircraft count in the header.
 ---
----
 
 ## 🗂 File Structure
 ```
@@ -70,18 +69,18 @@ src/
 | Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              | ![EPD](images/noair.png)<br>[Buy](https://www.waveshare.com/4.2inch-e-paper-module.htm) |
 | Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](images/button.png)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
 
-
+---
 ## ⚙️ How to DIY
 
 ### Software setup
-### 🔧 1. get Openskynet API credentials
+#### 🌐 1. get Openskynet API credentials
 
 - Create an [OpenSky Network](https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/auth?response_type=code&client_id=website-ui&scope=openid&redirect_uri=https%3A%2F%2Fopensky-network.org%2Fredirect-uri&state=6946459d-6755-4361-887d-81976590974b) account 
 
 - Sign in to your account, then under `API Client` click `Create & Download Credential`.
 - credential file will be downloaded as `credentials.json`, in that your clientId	and clientSecret will be precent, keep this info for now we need it later.
 
-### 🚀 2. Firmware upload to ESP32
+#### ⚡ 2. Firmware upload to ESP32
 
 - Download release ZIP, and extract them, inside you find Bootloader.bin, partition.bin and firmware.bin.
 - Go to [ESP online flasher](https://espressif.github.io/esptool-js/).
@@ -89,9 +88,9 @@ src/
 - by clicking on add file you can add files and choose the appiriate files as shown on the image, and click program this might take a while
 - <img src="images/esptools-bins.png" alt="Installation Image"/>
    
-### 🧱 Hardware Setup
+### 🧰 Hardware Setup
 
-#### 🖥 1. Wire Connections
+#### 🖇️ 1. Wire Connections
 
 Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown below:
 
@@ -124,7 +123,7 @@ Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown 
 
 
 
-## 🔧 Setup (PlatformIO)
+## 🔧 Development Setup (PlatformIO)
 
-Your `platformio.ini` should look like:
+User VScode with PlatformIO
 
