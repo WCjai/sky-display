@@ -23,8 +23,8 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
 |------------------------|----------------------------------------|------------------|
 | ESP32 Dev Board        | At least 4MB flash (any model)         | ![ESP32](images/cmbo.png)<br>[Buy](https://robu.in/product/esp32-wroom-32d-iot-development-doard-module-for-arduino/?gad_source=1&gad_campaignid=17413441824) |
 | Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              | ![EPD](images/noair.png)<br>[Buy](https://www.waveshare.com/4.2inch-e-paper-module.htm) |
-| Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](https://upload.wikimedia.org/wikipedia/commons/thumb/f/f7/Tactile_button_black.jpg/120px-Tactile_button_black.jpg)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
-| Power Supply           | USB or LiPo battery (as preferred)     | ![Power](https://cdn.sparkfun.com//assets/parts/1/1/7/7/13896-01.jpg)<br>[Buy LiPo](https://www.amazon.in/s?k=lipo+battery+esp32) |
+| Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](images/button.png)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
+
 
 
 ---
