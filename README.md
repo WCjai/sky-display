@@ -21,7 +21,7 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
 
 | Component               | Notes                                 | Image & Buy Link |
 |------------------------|----------------------------------------|------------------|
-| ESP32 Dev Board        | At least 4MB flash (any model)         | ![ESP32](images/cmbo.png)<br>[Buy on Robu]([https://www.amazon.in/s?k=esp32+dev+board](https://robu.in/product/esp32-wroom-32d-iot-development-doard-module-for-arduino/?gad_source=1&gad_campaignid=17413441824&gclid=Cj0KCQjwss3DBhC3ARIsALdgYxOr-GeEBhy0ut2g-OloaB95LkJJ2JqRCnFXbbuMvX5NV7Vgm-9_p8oaAmC8EALw_wcB)) |
+| ESP32 Dev Board        | At least 4MB flash (any model)         | ![ESP32](images/cmbo.png)<br>[Buy](https://robu.in/product/esp32-wroom-32d-iot-development-doard-module-for-arduino/?gad_source=1&gad_campaignid=17413441824) |
 | Waveshare 4.2" E-Paper | Use the `epd4in2_V2` model              | ![EPD](https://www.waveshare.com/media/catalog/product/cache/1/image/600x/040ec09b1e35df139433887a97daa66f/e/p/epd4in2-v2-1.jpg)<br>[Buy on Waveshare](https://www.waveshare.com/4.2inch-e-paper-module.htm) |
 | Pushbutton             | For entering Config Mode (GPIO 2)      | ![Button](https://upload.wikimedia.org/wikipedia/commons/thumb/f/f7/Tactile_button_black.jpg/120px-Tactile_button_black.jpg)<br>[Buy on Amazon](https://www.amazon.in/s?k=push+button+tactile) |
 | Power Supply           | USB or LiPo battery (as preferred)     | ![Power](https://cdn.sparkfun.com//assets/parts/1/1/7/7/13896-01.jpg)<br>[Buy LiPo](https://www.amazon.in/s?k=lipo+battery+esp32) |
