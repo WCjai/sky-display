@@ -78,6 +78,7 @@ Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown 
 | GND       | GND         |
 
 📌 **Note:** Make sure the e-paper module is powered via **3.3V**, not 5V — Waveshare `epd4in2_V2` is a 3.3V logic display. Incorrect voltage may damage the screen.
+<img src="images/connectiong.png" alt="wireconnection"/>
 
 - attach a config button to ESP's gpio 2
 
