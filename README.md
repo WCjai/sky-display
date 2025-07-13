@@ -1,4 +1,4 @@
-# ✈️ ESP32 E-Paper Aircraft Tracker
+# ✈️ ESP32 E-Paper Sky Display
 
 A real-time aircraft tracking display using the OpenSky Network and a 4.2" e-paper display powered by an ESP32.
 
