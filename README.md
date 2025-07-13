@@ -30,7 +30,7 @@ This project uses an ESP32 microcontroller paired with a 4.2" e-paper display to
 
 ## 🗂 File Structure
 
-<pre><code>```text src/ ├── main.cpp # Main application entry point ├── config.h / config.cpp # Captive portal and preference saving ├── display.h / display.cpp # All e-paper rendering logic ├── fetch.h / fetch.cpp # API interaction (OpenSky + PlaneSpotters) ├── cache.h / cache.cpp # Circular cache for aircraft data └── OpenSkyAuthClient.h/.cpp # OAuth2 token management ```</code></pre>
+```text src/ ├── main.cpp # Main application entry point ├── config.h / config.cpp # Captive portal and preference saving ├── display.h / display.cpp # All e-paper rendering logic ├── fetch.h / fetch.cpp # API interaction (OpenSky + PlaneSpotters) ├── cache.h / cache.cpp # Circular cache for aircraft data └── OpenSkyAuthClient.h/.cpp # OAuth2 token management ```
 
 
 ---
