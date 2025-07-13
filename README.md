@@ -81,6 +81,7 @@ Connect the Waveshare 4.2" E-paper display (`epd4in2_V2`) to the ESP32 as shown 
 <img src="images/connectiong.png" alt="wireconnection"/>
 
 - attach a config button to ESP's gpio 2
+<img src="images/howtobutton1.png"/>
 
 ### Full setup
 - now that both hardware and software setup is done power on the ESP via USB or any prefered source
