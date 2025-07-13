@@ -99,7 +99,7 @@ String fetchFromOpenSky(const String& icao24, OpenSkyAuthClient& auth) {
       String model = doc["model"] | "";
       String operators = doc["operator"] | "";
       model.trim(); operators.trim();
-      return operators != "" ? operators + model : model;
+      return operators != "" ? operators +" "+ model : model;
     }
   }
   return "";

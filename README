@@ -1,0 +1,175 @@
+Absolutely. Here is a detailed documentation for your ESP32-based e-paper aircraft tracker project.
+✈️ ESP32 E-Paper Aircraft Tracker
+
+Real-time flight info display using OpenSky Network & e-paper
+📦 Project Overview
+
+This project uses an ESP32 microcontroller with a 4.2" e-paper display to show nearby aircraft in real time using data from the OpenSky Network. It supports:
+
+    📡 Live aircraft fetch via OpenSky REST API
+
+    🌐 Configurable Wi-Fi & credentials via captive portal
+
+    🌍 Time zone-aware timestamp rendering
+
+    ✈️ Aircraft model metadata via PlaneSpotters + OpenSky
+
+    📟 E-paper display with flicker-free partial updates
+
+    🧠 On-device caching of aircraft info (up to 30 entries)
+
+🧱 Hardware Requirements
+Component	Notes
+ESP32 (any dev board)	With at least 4MB flash
+Waveshare 4.2" e-paper	epd4in2_V2 model
+Pushbutton	Used for entering Config Mode
+Optional power source	USB, LiPo, etc.
+🗂 File Structure
+
+src/
+├── main.cpp                   # Entry point
+├── config.h / config.cpp      # Preferences, AP-mode config portal
+├── display.h / display.cpp    # All e-paper drawing logic
+├── fetch.h / fetch.cpp        # OpenSky/PlaneSpotters + state updates
+├── cache.h / cache.cpp        # Aircraft data cache + sorting
+├── OpenSkyAuthClient.h/.cpp   # Handles OAuth2 token fetch
+
+⚙️ How It Works
+1. Boot & Config Mode
+
+    On boot, if GPIO 2 is held LOW, the ESP32 enters Config Mode
+
+    A Wi-Fi AP ESP_Config is created
+
+    The user connects and fills:
+
+        WiFi SSID & Password
+
+        OpenSky Client ID + Secret
+
+        Home Lat, Lon, Zoom level
+
+        Timezone and 24h format toggle
+
+    These values are saved to Preferences
+
+2. Normal Mode
+
+    WiFi connects using saved credentials
+
+    OpenSkyAuthClient fetches a valid token
+
+    Every 15 seconds:
+
+        Nearby aircraft are queried
+
+        Positions are filtered by bounding box (based on zoom)
+
+        For each new aircraft:
+
+            Metadata is fetched from PlaneSpotters/OpenSky
+
+            Model, callsign, bearing, and distance are cached
+
+    Aircraft data is displayed:
+
+        Model on Line 1
+
+        Info on Line 2: Callsign + distance + direction + country
+
+3. Display Modes
+
+    If no aircraft nearby:
+
+        Time and date are shown with no aircraft nearby message
+
+        This screen uses partial updates to avoid flicker
+
+    If aircraft are nearby:
+
+        Up to 5 aircraft shown in alternating inverted color blocks
+
+        Header shows time and aircraft count
+
+🧠 Key Features
+✅ Timezone-Aware Clock
+
+    TZ_minutes calculated from dropdown (e.g., +05:30)
+
+    Applies offset before formatting time with strftime
+
+✅ Caching
+
+    AircraftCacheEntry[] holds:
+
+        icao24, model, callsign, distance, bearing, active
+
+    cacheIndex cycles through 30-slot ring buffer
+
+    sortAircraftCacheByDistance() helps prioritize closest craft
+
+✅ Flicker-Free Display
+
+    E-paper updates are:
+
+        Partial for aircraft & time refresh
+
+        Full only when switching display modes (e.g., from no aircraft → aircraft found)
+
+🔧 Setup (PlatformIO)
+platformio.ini
+
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+lib_deps =
+  bblanchon/ArduinoJson@^6.21.3
+  # Add your e-paper library
+build_flags =
+  -DCORE_DEBUG_LEVEL=3
+
+🔐 OpenSky Credentials
+
+To get a client ID/secret:
+
+    Register at OpenSky REST
+
+    Use the credentials in the Config Portal
+
+    Your access token is auto-refreshed when expired
+
+🚦 How to Use
+✅ First Boot
+
+    Hold button connected to GPIO 2 LOW
+
+    Connect to ESP_Config WiFi
+
+    Go to http://192.168.4.1
+
+    Fill form and hit Save
+
+✅ Normal Operation
+
+    Every 15s, display updates automatically
+
+    Shows:
+
+        Live aircraft
+
+        Model + Callsign
+
+        Compass direction and distance
+
+📌 Future Ideas
+
+    Add aircraft icons / pixel graphics
+
+    Use barometric data to show altitude
+
+    Add BLE or MQTT for remote commands
+
+    Store history in SPIFFS or SD card
+
+    Implement paginated aircraft lists

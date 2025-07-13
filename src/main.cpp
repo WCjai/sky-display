@@ -86,7 +86,7 @@ void loop() {
     }
   }
 
-  if (millis() - lastFetch > 15000) {
+  if (millis() - lastFetch > 25000) {
     lastFetch = millis();
     fetchOpenSkyDataWithBoundingBox(HOME_LAT, HOME_LON, ZOOM, *pAuthClient);
     printAircraftCacheSorted();
