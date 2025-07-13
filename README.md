@@ -58,7 +58,7 @@ src/
 - Go to [ESP online flasher](https://espressif.github.io/esptool-js/).
 - connect you ESP with the machine while holding the boot button of the esp, then on browser under 'program' click connect, a popup will appear choose the serial port the esp is connected and click connect on popup box again now the esp should be connected [note: if esp didnt connect, plug out the esp and then hold the boot button then plug back in keep holding the boot button till you get connected with esp]
 - by clicking on add file you can add files and choose the appiriate files as shown on the image, and click program this might take a while
-- <img src="images/esptools-bins.png" alt="Installation Image" width="500"/>
+- <img src="images/esptools-bins.png" alt="Installation Image"/>
    
 ### Hardware setup
 ### 🖥 1. Wire connection
