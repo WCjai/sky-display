@@ -254,6 +254,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     if (totalAircraft == 0) {
       if (lastHadAircraft) { epd.Init(); epd.Clear(); }
       drawNoAircraftScreen(timestamp);
+      //drawNoAircraftScreen(timestamp);
       lastHadAircraft = false;
     } else {
       if (!lastHadAircraft) { epd.Init(); epd.Clear(); }

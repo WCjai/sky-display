@@ -36,5 +36,8 @@ void drawStatusScreenwithline(const char* line1,
                               const char* line6 = "");
 void drawNoAircraftScreen(time_t timestamp);
 
+int getActiveCount();
+// Convenience: true if at least one aircraft is available
+bool hasActiveAircraft();
 // LIVE list: batched partial (one refresh total). Does nothing if HOLD.
 void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraft);

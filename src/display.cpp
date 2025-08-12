@@ -51,6 +51,35 @@ struct RowView {
   bool   active;
 };
 
+// in display.cpp (near top)
+static void DrawBitmap1bpp(Paint& p, int x, int y,
+                           const uint8_t* data, int w, int h,
+                           int color) {
+  const int stride = (w + 7) / 8;
+  for (int j = 0; j < h; ++j) {
+    const uint8_t* row = data + j * stride;
+    uint8_t mask = 0x80; int byte = 0;
+    for (int i = 0; i < w; ++i) {
+      if (row[byte] & mask) p.DrawAbsolutePixel(x + i, y + j, color);
+      mask >>= 1; if (!mask) { mask = 0x80; ++byte; }
+    }
+  }
+}
+
+static int countActiveAircraft() {
+  int cnt = 0;
+  for (int i = 0; i < MAX_CACHE_SIZE; i++) {
+    if (aircraftCache[i].icao24 != "" && aircraftCache[i].distance >= 0) cnt++;
+  }
+  return cnt;
+}
+
+int getActiveCount() {          // <--- NEW (exposed in .h)
+  return countActiveAircraft();
+}
+bool hasActiveAircraft() {
+  return getActiveCount() >= 5;   // must have at least 5 to enter HOLD
+}
 // safe copy helper
 static void cpyBound(char* dst, size_t dstsz, const String& src) {
   if (!dst || dstsz == 0) return;
@@ -126,7 +155,7 @@ void drawStatusScreenwithline(const char* line1,
                               const char* line6) {
   ScopedDispLock _;
   full_paint.Clear(UNCOLORED);
-  epd.Init();
+  epd.Init_Fast(0);
   epd.Clear();
 
   sFONT* font = &Font16;
@@ -146,40 +175,136 @@ void drawStatusScreenwithline(const char* line1,
 
 void drawNoAircraftScreen(time_t timestamp) {
   ScopedDispLock _;
+
+  // Apply timezone offset and format strings
   time_t zoned = timestamp + (TZ_minutes * 60);
   struct tm* ti = gmtime(&zoned);
 
-  char dateStr[32];  strftime(dateStr,  sizeof(dateStr),  "%a %Y-%m-%d", ti);
-  char clockStr[16]; if (USE_24H) strftime(clockStr, sizeof(clockStr), "%H:%M", ti);
-                     else         strftime(clockStr, sizeof(clockStr), "%I:%M %p", ti);
+  char dateStr[32];
+  strftime(dateStr, sizeof(dateStr), "%a %Y-%m-%d", ti);
+
+  char clockStr[16];
+  if (USE_24H) strftime(clockStr, sizeof(clockStr), "%H:%M", ti);
+  else         strftime(clockStr, sizeof(clockStr), "%I:%M %p", ti);
 
   int currentY = 0;
 
-  // Date
+  // --- Date (write-only, no refresh yet) ---
   paint.Clear(UNCOLORED);
   int dateX = (kScreenW - (int)strlen(dateStr) * Font16.Width) / 2;
   paint.DrawStringAt(dateX, 5, dateStr, &Font16, COLORED);
-  epd.Display_Partial(paint.GetImage(), 0, currentY, kScreenW, currentY + kLineH);
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, currentY, kScreenW, currentY + kLineH);
   currentY += kLineH;
 
-  // Time
+  // --- Time (centered) (write-only) ---
   int clockY = (kScreenH - Font24.Height) / 2;
   paint.Clear(UNCOLORED);
   int clockX = (kScreenW - (int)strlen(clockStr) * Font24.Width) / 2;
-  paint.DrawStringAt(clockX, 5, clockStr, &Font24, COLORED);
+  paint.DrawStringAt(clockX,     5, clockStr, &Font24, COLORED);
   paint.DrawStringAt(clockX + 1, 5, clockStr, &Font24, COLORED);  // fake bold
-  epd.Display_Partial(paint.GetImage(), 0, clockY, kScreenW, clockY + kLineH);
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, clockY, kScreenW, clockY + kLineH);
 
-  // Footer
+  // --- Footer (write-only) ---
   const char* footer = "no aircraft nearby";
   int footerY = kScreenH - kLineH;
   paint.Clear(UNCOLORED);
   int footerX = (kScreenW - (int)strlen(footer) * Font16.Width) / 2;
   paint.DrawStringAt(footerX, 5, footer, &Font16, COLORED);
-  epd.Display_Partial(paint.GetImage(), 0, footerY, kScreenW, footerY + kLineH);
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, footerY, kScreenW, footerY + kLineH);
+
+  // --- Single partial refresh to apply all three bands ---
+  epd.TurnOnDisplay_Partial();
 }
 
 // -------- HOLD (single FULL refresh, zebra stripes) --------
+// static void drawHoldPageFullBuffer() {
+//   // 1) Snapshot + sort
+//   RowView rows[MAX_CACHE_SIZE];
+//   int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
+//   std::sort(rows, rows + active, [](const RowView& a, const RowView& b){
+//     return a.distance < b.distance;
+//   });
+//   recalcPagingFromActive(active);
+
+//   ScopedDispLock _;
+
+//   // 2) Build HH:MM from the same source LIVE uses (sLastTimeStr)
+//   //    LIVE sets sLastTimeStr to formats like "YYYY-MM-DD | HH:MM:SS" (24h)
+//   //    or "YYYY-MM-DD | HH:MM:SS AM/PM" (12h). We parse HH:MM robustly.
+//   char hhmm[6] = "--:--";
+//   if (sLastTimeStr[0]) {
+//     const char* p = strchr(sLastTimeStr, '|');  // find first '|'
+//     if (p) {
+//       p++; // move past '|'
+//       while (*p && !isdigit((unsigned char)*p)) p++; // advance to first digit
+//       int H = 0, M = 0;
+//       if (sscanf(p, "%2d:%2d", &H, &M) == 2) {
+//         if (H < 0) H = 0; if (H > 23) H = H % 24;
+//         if (M < 0) M = 0; if (M > 59) M = M % 60;
+//         snprintf(hhmm, sizeof(hhmm), "%02d:%02d", H, M);
+//       }
+//     }
+//   }
+//   // Fallback to local clock if LIVE hasn't populated sLastTimeStr yet
+//   if (hhmm[0] == '-' && hhmm[1] == '-') {
+//     time_t now = time(nullptr);
+//     struct tm ti;
+//     localtime_r(&now, &ti);
+//     snprintf(hhmm, sizeof(hhmm), "%02d:%02d", ti.tm_hour, ti.tm_min);
+//   }
+
+//   // 3) Compose full frame (white text on black background)
+//   full_paint.Clear(COLORED);
+
+//   char header[64];
+//   snprintf(header, sizeof(header), "HOLD | %s | PAGE %d/%d | TOTAL:%d",
+//            hhmm, sCurrentPage, sTotalPages, sTotalActive);
+//   full_paint.DrawStringAt(0, 5, header, &Font16, UNCOLORED);
+
+//   int y = kLineH;
+//   const int maxShown = 5;
+//   const int start    = (sCurrentPage - 1) * maxShown;
+
+//   int shown = 0;
+//   for (int i = start; i < active && shown < maxShown; i++) {
+//     const auto& r = rows[i];
+
+//     // Callsign (fallback to ICAO), safe fixed-width fields
+//     char callsign[9];
+//     if (r.callsign[0] == '\0') { strncpy(callsign, r.icao24, sizeof(callsign)); callsign[sizeof(callsign)-1] = '\0'; }
+//     else                       { strncpy(callsign, r.callsign, sizeof(callsign)); callsign[sizeof(callsign)-1] = '\0'; }
+
+//     char csPadded[8];  snprintf(csPadded, sizeof(csPadded), "%-7.7s", callsign);
+
+//     float dist = r.distance; if (dist > 99999.9f) dist = 99999.9f;
+//     char distPadded[12]; snprintf(distPadded, sizeof(distPadded), "%7.1f", dist);
+
+//     int  bInt = (int)r.bearing; if (bInt < 0) bInt += 360; if (bInt > 359) bInt -= 360;
+//     char brg[4];  snprintf(brg, sizeof(brg), "%3d", bInt);
+
+//     char cd[3];   compass2(r.bearing, cd);
+
+//     char infoLine[96];
+//     snprintf(infoLine, sizeof(infoLine), "%s%skm %s%s %s",
+//              csPadded, distPadded, brg, cd, r.country);
+
+//     // Model line — white on black
+//     full_paint.DrawStringAt(5, y + 5, r.model, &Font16, UNCOLORED);
+//     y += kLineH;
+
+//     // Info line — white on black
+//     full_paint.DrawStringAt(5, y + 5, infoLine, &Font16, UNCOLORED);
+//     y += kLineH;
+
+//     shown++;
+//   }
+
+//   // 4) Push once (fast full-frame)
+//   epd.Init_Fast(0);
+//   epd.Display(full_paint.GetImage());
+// }
+
+
 static void drawHoldPageFullBuffer() {
   RowView rows[MAX_CACHE_SIZE];
   int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
@@ -190,12 +315,34 @@ static void drawHoldPageFullBuffer() {
 
   ScopedDispLock _;
 
+  char hhmm[6] = "--:--";
+  if (sLastTimeStr[0]) {
+    const char* p = strchr(sLastTimeStr, '|');  // find first '|'
+    if (p) {
+      p++; // move past '|'
+      while (*p && !isdigit((unsigned char)*p)) p++; // advance to first digit
+      int H = 0, M = 0;
+      if (sscanf(p, "%2d:%2d", &H, &M) == 2) {
+        if (H < 0) H = 0; if (H > 23) H = H % 24;
+        if (M < 0) M = 0; if (M > 59) M = M % 60;
+        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", H, M);
+      }
+    }
+  }
+  // Fallback to local clock if LIVE hasn't populated sLastTimeStr yet
+  if (hhmm[0] == '-' && hhmm[1] == '-') {
+    time_t now = time(nullptr);
+    struct tm ti;
+    localtime_r(&now, &ti);
+    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", ti.tm_hour, ti.tm_min);
+  }
+
   full_paint.Clear(UNCOLORED);
 
   // Bold-ish header
   char header[64];
-  snprintf(header, sizeof(header), "HOLD | page %d/%d | Aircraft Total:%d",
-           sCurrentPage, sTotalPages, sTotalActive);
+  snprintf(header, sizeof(header), "HOLD | %s | PAGE %d/%d | TOTAL:%d",
+           hhmm, sCurrentPage, sTotalPages, sTotalActive);
   full_paint.DrawStringAt(0, 5, header, &Font16, COLORED);
   full_paint.DrawStringAt(1, 5, header, &Font16, COLORED);
 
@@ -250,7 +397,7 @@ static void drawHoldPageFullBuffer() {
   }
 
   // One FULL refresh
-  epd.Init();
+  epd.Init_Fast(0);
   epd.Display(full_paint.GetImage());
 }
 
@@ -278,10 +425,11 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int /*totalAircraftF
 
   // Header (write only)
   char header[64];
-  snprintf(header, sizeof(header), "%s | Total:%d",
+  snprintf(header, sizeof(header), "%s | TOTAL:%d",
            (timeStr && timeStr[0]) ? timeStr : sLastTimeStr, sTotalActive);
   paint.Clear(UNCOLORED);
   paint.DrawStringAt(0, 5, header, &Font16, COLORED);
+  paint.DrawStringAt(1, 5, header, &Font16, COLORED);
   epd.Display_Partial_Not_refresh(paint.GetImage(), 0, currentLine, kScreenW, currentLine + kLineH);
   currentLine += kLineH; linesUsed++;
 
@@ -343,6 +491,9 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int /*totalAircraftF
 DisplayMode getDisplayMode() { return sMode; }
 
 void setDisplayMode(DisplayMode m) {
+  if (m == HOLD_MODE && getActiveCount() < 5) {
+    return;
+  }
   if (sMode == m) return;
   sMode = m;
 
@@ -355,7 +506,7 @@ void setDisplayMode(DisplayMode m) {
   // 1) Do any full-panel init/clear while holding the mutex
   {
     ScopedDispLock _;
-    epd.Init();
+    epd.Init_Fast(0);
     epd.Clear();
   }
 
@@ -384,3 +535,4 @@ void redrawHoldPageFull() {
   if (sMode != HOLD_MODE) return;
   drawHoldPageFullBuffer();
 }
+
