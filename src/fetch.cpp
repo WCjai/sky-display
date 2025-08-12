@@ -150,6 +150,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       JsonArray states = doc["states"].as<JsonArray>();
       int totalAircraft = states.size();
 
+      // Build time string (24h optional as per your config)
       char timeStr[64];
       time_t zoned = timestamp + TZ_minutes * 60;
       struct tm* ti = gmtime(&zoned);
@@ -159,33 +160,26 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
         strftime(timeStr, sizeof(timeStr), "%Y-%m-%d | %I:%M:%S %p", ti);
       }
 
-        
-
-        if (totalAircraft == 0) {
-            if (lastHadAircraft) {
-                epd.Init();
-                epd.Clear();
-            }
-            drawNoAircraftScreen(timestamp);
-            drawNoAircraftScreen(timestamp);
-            lastHadAircraft = false;
-        } else {
-            if (!lastHadAircraft) {
-                epd.Init();
-                epd.Clear();
-            }
-            drawAircraftInfoToDisplay_Partial(timeStr, totalAircraft);
-            drawAircraftInfoToDisplay_Partial(timeStr, totalAircraft);
-            lastHadAircraft = true;
+      if (totalAircraft == 0) {
+        if (lastHadAircraft) { epd.Init(); epd.Clear(); }
+        drawNoAircraftScreen(timestamp);
+        lastHadAircraft = false;
+      } else {
+        if (!lastHadAircraft) { epd.Init(); epd.Clear(); }
+        // ONLY draw in LIVE mode; HOLD mode UI is user-driven (single refresh per button)
+        if (getDisplayMode() == LIVE_MODE) {
+          drawAircraftInfoToDisplay_Partial(timeStr, totalAircraft);
         }
+        lastHadAircraft = true;
+      }
 
-
+      // --- Fill cache (unchanged) ---
       for (JsonArray state : states) {
-        String icao24 = state[0] | "";
-        String callsign = state[1] | "";
+        String icao24  = state[0] | "";
+        String callsign= state[1] | "";
         String country = state[2] | "";
-        float lon = state[5] | 0.0;
-        float lat = state[6] | 0.0;
+        float lon      = state[5] | 0.0;
+        float lat      = state[6] | 0.0;
 
         if (icao24 != "" && lat != 0.0 && lon != 0.0) {
           float dist = haversineDistance(centerLat, centerLon, lat, lon);
@@ -195,26 +189,23 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
           for (int i = 0; i < MAX_CACHE_SIZE; i++) {
             if (aircraftCache[i].icao24 == icao24) {
               aircraftCache[i].distance = dist;
-              aircraftCache[i].bearing = brng;
-              aircraftCache[i].active = true;
+              aircraftCache[i].bearing  = brng;
+              aircraftCache[i].active   = true;
               found = true;
               break;
             }
           }
-
           if (!found) {
             String model = fetchAircraftModel(icao24, auth);
             addToCache(icao24, model, callsign, country, dist, brng);
             for (int i = 0; i < MAX_CACHE_SIZE; i++) {
-              if (aircraftCache[i].icao24 == icao24) {
-                aircraftCache[i].active = true;
-                break;
-              }
+              if (aircraftCache[i].icao24 == icao24) { aircraftCache[i].active = true; break; }
             }
           }
         }
       }
 
+      // Clear any inactive slots
       for (int i = 0; i < MAX_CACHE_SIZE; i++) {
         if (!aircraftCache[i].active) aircraftCache[i] = {};
       }

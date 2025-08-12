@@ -18,6 +18,15 @@ extern int TZ_minutes;
 
 
 
+enum DisplayMode { LIVE_MODE, HOLD_MODE };
+
+void setDisplayMode(DisplayMode m);   // will NOT draw when entering HOLD; WILL draw when entering LIVE
+DisplayMode getDisplayMode();         // NEW: query current mode
+
+
+void pageUp();                        // HOLD: next page (does one FULL refresh)
+void pageDown();                      // HOLD: prev page (one FULL refresh)
+void redrawHoldPageFull();            // HOLD: redraw current page once (FULL refresh)
 
 void drawStatusScreen(const char* msg);
 void drawStatusScreenwithline(const char* line1,
