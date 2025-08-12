@@ -1,4 +1,3 @@
-// display.h
 #pragma once
 
 #include <Arduino.h>
@@ -16,17 +15,17 @@ extern unsigned char full_image[];
 extern bool USE_24H;
 extern int TZ_minutes;
 
-
-
 enum DisplayMode { LIVE_MODE, HOLD_MODE };
 
-void setDisplayMode(DisplayMode m);   // will NOT draw when entering HOLD; WILL draw when entering LIVE
-DisplayMode getDisplayMode();         // NEW: query current mode
+// Call this once in setup() before any drawing:
+void initDisplayMutex();
 
+void setDisplayMode(DisplayMode m);      // entering HOLD: no draw; entering LIVE: draws once
+DisplayMode getDisplayMode();
 
-void pageUp();                        // HOLD: next page (does one FULL refresh)
-void pageDown();                      // HOLD: prev page (one FULL refresh)
-void redrawHoldPageFull();            // HOLD: redraw current page once (FULL refresh)
+void pageUp();                           // HOLD: next page (one FULL refresh)
+void pageDown();                         // HOLD: prev page (one FULL refresh)
+void redrawHoldPageFull();               // HOLD: redraw current page (one FULL refresh)
 
 void drawStatusScreen(const char* msg);
 void drawStatusScreenwithline(const char* line1,
@@ -36,4 +35,6 @@ void drawStatusScreenwithline(const char* line1,
                               const char* line5 = "",
                               const char* line6 = "");
 void drawNoAircraftScreen(time_t timestamp);
+
+// LIVE list: batched partial (one refresh total). Does nothing if HOLD.
 void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraft);

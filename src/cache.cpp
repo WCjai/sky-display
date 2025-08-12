@@ -1,71 +1,139 @@
-// cache.cpp
 #include "cache.h"
 
+// -------- storage --------
 AircraftCacheEntry aircraftCache[MAX_CACHE_SIZE];
 int cacheIndex = 0;
 
-String getCompassDirection(float bearing) {
-  const char* directions[] = {
-    "N ", "NE", "E ", "SE", "S ", "SW", "W ", "NW", "N "
-  };
-  int index = round(bearing / 45.0);
-  return String((int)bearing) + directions[index];
+// -------- mutex --------
+SemaphoreHandle_t gCacheMutex = nullptr;
+void initCacheMutex() {
+  if (!gCacheMutex) gCacheMutex = xSemaphoreCreateMutex();
 }
 
-void addToCache(const String& icao24, const String& model, const String& callsign, const String& country, float distance, float bearing) {
-  for (int i = 0; i < MAX_CACHE_SIZE; i++) {
-    if (aircraftCache[i].icao24 == icao24) {
-      aircraftCache[i].model = model;
-      aircraftCache[i].callsign = callsign;
-      aircraftCache[i].country = country;
-      aircraftCache[i].distance = distance;
-      aircraftCache[i].bearing = bearing;
+// -------- local sanitation (bounds + ASCII printable only) --------
+static String sanitize(const String& in, size_t maxLen) {
+  String out;
+  out.reserve(min((size_t)in.length(), maxLen));
+  for (size_t i = 0; i < in.length() && out.length() < maxLen; ++i) {
+    char c = in[i];
+    // keep basic printable ASCII; collapse tabs/newlines to space
+    if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+    if (c >= 32 && c <= 126) out += c;
+  }
+  out.trim();
+  return out;
+}
+
+// 8-point compass with degree prefix e.g. "17N " (for Serial only)
+String getCompassDirection(float bearing) {
+  static const char* directions[] = {"N ","NE","E ","SE","S ","SW","W ","NW","N "};
+  int index = (int)lroundf(bearing / 45.0f);
+  if (index < 0) index = 0;
+  if (index > 8) index = 8;
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%d%s", (int)bearing, directions[index]);
+  return String(buf);
+}
+
+// -------- core ops (all thread-safe) --------
+
+void addToCache(const String& icao24,
+                const String& model,
+                const String& callsign,
+                const String& country,
+                float distance,
+                float bearing) {
+  // sanitize + bound all text up front
+  const String sIcao  = sanitize(icao24,   8);   // hex is 6–8 chars
+  const String sModel = sanitize(model,   46);   // fits in 48 chars UI buffer
+  const String sCall  = sanitize(callsign, 8);   // UI shows 7 + NUL
+  const String sCntry = sanitize(country, 31);   // fits in 32 chars UI buffer
+
+  if (sIcao.isEmpty()) return;
+
+  bool took = (!gCacheMutex) || (xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(150)) == pdTRUE);
+  if (!took) return;
+
+  // 1) update if already present
+  for (int i = 0; i < MAX_CACHE_SIZE; ++i) {
+    if (aircraftCache[i].icao24 == sIcao) {
+      if (sModel.length())   aircraftCache[i].model    = sModel;
+      if (callsign.length()) aircraftCache[i].callsign = sCall;
+      if (country.length())  aircraftCache[i].country  = sCntry;
+      if (distance >= 0.0f)  aircraftCache[i].distance = distance;
+      if (bearing  >= 0.0f)  aircraftCache[i].bearing  = bearing;
+      // don’t set active here; fetch loop controls it each cycle
+      if (gCacheMutex) xSemaphoreGive(gCacheMutex);
       return;
     }
   }
 
-  aircraftCache[cacheIndex].icao24 = icao24;
-  aircraftCache[cacheIndex].model = model;
-  aircraftCache[cacheIndex].callsign = callsign;
-  aircraftCache[cacheIndex].country = country;
-  aircraftCache[cacheIndex].distance = distance;
-  aircraftCache[cacheIndex].bearing = bearing;
+  // 2) insert at ring head
+  int idx = cacheIndex;
   cacheIndex = (cacheIndex + 1) % MAX_CACHE_SIZE;
+
+  aircraftCache[idx].icao24   = sIcao;
+  aircraftCache[idx].model    = sModel.length() ? sModel : String("Unknown");
+  aircraftCache[idx].callsign = sCall;
+  aircraftCache[idx].country  = sCntry;
+  aircraftCache[idx].distance = distance;
+  aircraftCache[idx].bearing  = bearing;
+  // active flag is set by fetch when this ICAO is seen in the latest scan
+
+  if (gCacheMutex) xSemaphoreGive(gCacheMutex);
 }
 
 String lookupCachedModel(const String& icao24) {
-  for (int i = 0; i < MAX_CACHE_SIZE; i++) {
-    if (aircraftCache[i].icao24 == icao24) {
-      return aircraftCache[i].model;
-    }
-  }
-  return "";
-}
+  const String sIcao = sanitize(icao24, 8);
+  if (sIcao.isEmpty()) return "";
 
-void sortAircraftCacheByDistance() {
-  for (int i = 0; i < MAX_CACHE_SIZE - 1; i++) {
-    for (int j = i + 1; j < MAX_CACHE_SIZE; j++) {
-      if (aircraftCache[j].distance >= 0 && 
-          (aircraftCache[i].distance < 0 || aircraftCache[j].distance < aircraftCache[i].distance)) {
-        AircraftCacheEntry temp = aircraftCache[i];
-        aircraftCache[i] = aircraftCache[j];
-        aircraftCache[j] = temp;
-      }
-    }
+  bool took = (!gCacheMutex) || (xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(150)) == pdTRUE);
+  if (!took) return "";
+
+  String model = "";
+  for (int i = 0; i < MAX_CACHE_SIZE; ++i) {
+    if (aircraftCache[i].icao24 == sIcao) { model = aircraftCache[i].model; break; }
   }
+
+  if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+  return model;
 }
 
 void printAircraftCacheSorted() {
-  sortAircraftCacheByDistance();
-  for (int i = 0; i < MAX_CACHE_SIZE; i++) {
-    if (aircraftCache[i].icao24 != "" && aircraftCache[i].distance >= 0) {
-      String direction = getCompassDirection(aircraftCache[i].bearing);
-      Serial.printf("✈️ %s — %.2f km — %s — [%s]\n",
-          aircraftCache[i].model.c_str(),
-          aircraftCache[i].distance,
-          direction.c_str(),
-          aircraftCache[i].callsign != "" ? aircraftCache[i].callsign.c_str() : aircraftCache[i].icao24.c_str()
-      );
+  // copy to a small local vector to avoid in-place sorts on shared array
+  struct Row {
+    String model, callsign, icao24;
+    float  distance, bearing;
+  };
+  Row rows[MAX_CACHE_SIZE];
+  int n = 0;
+
+  bool took = (!gCacheMutex) || (xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(200)) == pdTRUE);
+  if (took) {
+    for (int i = 0; i < MAX_CACHE_SIZE; ++i) {
+      const auto& e = aircraftCache[i];
+      if (e.icao24 != "" && e.distance >= 0) {
+        rows[n++] = Row{ e.model, e.callsign, e.icao24, e.distance, e.bearing };
+      }
     }
+    if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+  }
+
+  // simple insertion sort (n ≤ 30)
+  for (int i = 1; i < n; ++i) {
+    Row key = rows[i];
+    int j = i - 1;
+    while (j >= 0 && rows[j].distance > key.distance) { rows[j+1] = rows[j]; --j; }
+    rows[j+1] = key;
+  }
+
+  for (int i = 0; i < n; ++i) {
+    String dir = getCompassDirection(rows[i].bearing);
+    const String& cs = rows[i].callsign.length() ? rows[i].callsign : rows[i].icao24;
+    Serial.printf("✈️ %s — %.2f km — %s — [%s]\n",
+      rows[i].model.c_str(),
+      rows[i].distance,
+      dir.c_str(),
+      cs.c_str());
   }
 }

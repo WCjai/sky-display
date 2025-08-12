@@ -1,7 +1,9 @@
 #include "OpenSkyAuthClient.h"
 
 OpenSkyAuthClient::OpenSkyAuthClient(const String& clientId, const String& clientSecret)
-    : _clientId(clientId), _clientSecret(clientSecret), _accessToken(""), _tokenExpiry(0) {}
+: _clientId(clientId), _clientSecret(clientSecret), _accessToken(""), _tokenExpiry(0), _mtx(nullptr) {
+    _mtx = xSemaphoreCreateMutex();
+}
 
 bool OpenSkyAuthClient::fetchNewToken() {
     HTTPClient http;
@@ -13,7 +15,6 @@ bool OpenSkyAuthClient::fetchNewToken() {
                   "&client_secret=" + _clientSecret;
 
     int httpCode = http.POST(body);
-
     if (httpCode == 200) {
         String payload = http.getString();
         DynamicJsonDocument doc(2048);
@@ -23,11 +24,9 @@ bool OpenSkyAuthClient::fetchNewToken() {
             http.end();
             return false;
         }
-
         _accessToken = doc["access_token"].as<String>();
         int expiresIn = doc["expires_in"] | 300;
         _tokenExpiry = millis() + (expiresIn - 10) * 1000;
-
         Serial.println("✅ OpenSky token fetched.");
         http.end();
         return true;
@@ -39,17 +38,33 @@ bool OpenSkyAuthClient::fetchNewToken() {
 }
 
 bool OpenSkyAuthClient::ensureValidToken() {
-    if (_accessToken == "" || millis() > _tokenExpiry) {
-        Serial.println("[OpenSkyAuthClient] Token expired or empty. Fetching new...");
-        return fetchNewToken();
+    if (_mtx) xSemaphoreTake(_mtx, portMAX_DELAY);
+    bool need = (_accessToken == "" || millis() > _tokenExpiry);
+    if (!need) {
+        if (_mtx) xSemaphoreGive(_mtx);
+        return true;
     }
-    return true;
+    // Release lock while doing HTTP to avoid blocking other callers too long
+    if (_mtx) xSemaphoreGive(_mtx);
+
+    bool ok = fetchNewToken();
+
+    if (_mtx) xSemaphoreTake(_mtx, portMAX_DELAY);
+    // nothing else to do; fetchNewToken already set members
+    if (_mtx) xSemaphoreGive(_mtx);
+    return ok;
 }
 
 bool OpenSkyAuthClient::isTokenValid() {
-    return !_accessToken.isEmpty() && millis() < _tokenExpiry;
+    if (_mtx) xSemaphoreTake(_mtx, portMAX_DELAY);
+    bool ok = !_accessToken.isEmpty() && millis() < _tokenExpiry;
+    if (_mtx) xSemaphoreGive(_mtx);
+    return ok;
 }
 
 String OpenSkyAuthClient::getAccessToken() {
-    return _accessToken;
+    if (_mtx) xSemaphoreTake(_mtx, portMAX_DELAY);
+    String tok = _accessToken;
+    if (_mtx) xSemaphoreGive(_mtx);
+    return tok;
 }

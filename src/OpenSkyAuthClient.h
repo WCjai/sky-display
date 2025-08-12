@@ -4,20 +4,24 @@
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 class OpenSkyAuthClient {
 public:
     OpenSkyAuthClient(const String& clientId, const String& clientSecret);
 
-    bool ensureValidToken();               // Checks and refreshes token if needed
-    String getAccessToken();               // Returns current access token
-    bool isTokenValid();                   // Token still valid?
+    bool ensureValidToken();   // Checks and refreshes token if needed
+    String getAccessToken();   // Returns current access token
+    bool isTokenValid();       // Token still valid?
 
 private:
     String _clientId;
     String _clientSecret;
     String _accessToken;
-    unsigned long _tokenExpiry;            // millis-based
+    unsigned long _tokenExpiry;    // millis-based
+
+    SemaphoreHandle_t _mtx;        // <— protects access/refresh
 
     bool fetchNewToken();
 };
