@@ -35,10 +35,13 @@ static int  sCurrentPage = 1;       // 1-indexed
 static int  sTotalPages  = 1;
 static int  sTotalActive = 0;
 static char sLastTimeStr[64] = "";
+static int sHoldFlipCount = 0;
+static const int kFullEvery = 8; // do a full refresh every 8 flips to kill ghosting
 
 static constexpr int kScreenW = 400;
 static constexpr int kScreenH = 300;
 static constexpr int kLineH   = 27;
+static bool sHoldPartialInit = false;
 
 // compact snapshot — no Arduino String on heap in draw path
 struct RowView {
@@ -73,6 +76,17 @@ static int countActiveAircraft() {
   }
   return cnt;
 }
+
+static void holdMaybeFullRefresh() {
+  if (++sHoldFlipCount >= kFullEvery) {
+    sHoldFlipCount = 0;
+    // Keep the same fast LUT; issue a partial "turn-on" to reduce ghosting.
+    // This re-drives the currently written partial bands without clearing.
+    epd.Init_Fast(Seconds_1S);
+    epd.TurnOnDisplay_Partial();
+  }
+}
+
 
 int getActiveCount() {          // <--- NEW (exposed in .h)
   return countActiveAircraft();
@@ -490,45 +504,159 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int /*totalAircraftF
 // -------- Mode & paging API --------
 DisplayMode getDisplayMode() { return sMode; }
 
+
 void setDisplayMode(DisplayMode m) {
+  // Guard: don’t enter HOLD when <5 aircraft
   if (m == HOLD_MODE && getActiveCount() < 5) {
+    // Optional: flash a small message if you want
     return;
   }
-  if (sMode == m) return;
+
+  if (sMode == m) {
+    // If we’re already in HOLD and the user presses again while nothing is drawn,
+    // force a draw so the first press still shows something.
+    if (m == HOLD_MODE) {
+      recalcPagingFromActive(getActiveCount());
+      sCurrentPage = max(1, min(sCurrentPage, sTotalPages));
+      drawHoldPagePartial();
+    }
+    return;
+  }
+
   sMode = m;
 
   if (sMode == HOLD_MODE) {
-    sCurrentPage = 1;          // no drawing here
-    return;
-  }
+    // Prep partial mode and draw immediately (page 1)
+    epd.Init_Fast(Seconds_1S);       // fast LUT for partials
+    full_paint.Clear(UNCOLORED);
+    epd.Display_Base(full_paint.GetImage());  // stable base for partial updates
 
-  // We’re going to LIVE mode:
-  // 1) Do any full-panel init/clear while holding the mutex
-  {
-    ScopedDispLock _;
-    epd.Init_Fast(0);
+    recalcPagingFromActive(getActiveCount());
+    sCurrentPage = 1;
+    drawHoldPagePartial();            // <-- draw on first press
+  } else {
+    // Back to LIVE: draw right away using last timestamp
+    epd.Init(); 
     epd.Clear();
+    drawAircraftInfoToDisplay_Partial(sLastTimeStr, 0);
+  }
+}
+
+void drawHoldPagePartial() {
+  // Build a stable snapshot (so paging doesn’t change mid-draw)
+  RowView rows[MAX_CACHE_SIZE];
+  int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
+  std::sort(rows, rows + active, [](const RowView& a, const RowView& b){
+    return a.distance < b.distance;
+  });
+  recalcPagingFromActive(active);
+
+  const int maxShown = 5;
+  const int start    = (sCurrentPage - 1) * maxShown;
+
+  // HH:MM from last live header (fallback to local)
+  char hhmm[6] = "--:--";
+  if (sLastTimeStr[0]) {
+    const char* p = strchr(sLastTimeStr, '|');
+    if (p) {
+      p++;
+      while (*p && !isdigit((unsigned char)*p)) p++;
+      int H = 0, M = 0;
+      if (sscanf(p, "%2d:%2d", &H, &M) == 2) {
+        if (H < 0) H = 0; if (H > 23) H = H % 24;
+        if (M < 0) M = 0; if (M > 59) M = M % 60;
+        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", H, M);
+      }
+    }
+  }
+  if (hhmm[0] == '-' && hhmm[1] == '-') {
+    time_t now = time(nullptr);
+    struct tm ti;
+    localtime_r(&now, &ti);
+    snprintf(hhmm, sizeof(hhmm), "%02d:%02d", ti.tm_hour, ti.tm_min);
   }
 
-  // 2) Make sure the preempt flag isn’t set so the partial can complete
-  gHoldRequested = false;
+  // Header
+  char header[64];
+  snprintf(header, sizeof(header), "HOLD | %s | PAGE %d/%d | TOTAL:%d",
+           hhmm, sCurrentPage, sTotalPages, sTotalActive);
 
-  // 3) Now draw the LIVE view (this function will take the mutex itself)
-  drawAircraftInfoToDisplay_Partial(sLastTimeStr, 0);
+  int y = 0;
+  paint.Clear(UNCOLORED);
+  paint.DrawStringAt(0, 5, header, &Font16, COLORED);
+  //paint.DrawStringAt(1, 5, header, &Font16, COLORED); // fake bold
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
+  y += kLineH;
+
+  // ----- Rows with zebra stripes (write-only) -----
+  int shown = 0;
+  for (int i = start; i < active && shown < maxShown; i++) {
+    const auto& r = rows[i];
+
+    // callsign (fallback to ICAO)
+    char callsign[9];
+    if (r.callsign[0] == '\0') { strncpy(callsign, r.icao24, sizeof(callsign)); callsign[sizeof(callsign)-1] = '\0'; }
+    else                       { strncpy(callsign, r.callsign, sizeof(callsign)); callsign[sizeof(callsign)-1] = '\0'; }
+
+    char csPadded[8];  snprintf(csPadded, sizeof(csPadded), "%-7.7s", callsign);
+
+    float dist = r.distance; if (dist > 99999.9f) dist = 99999.9f;
+    char distPadded[12]; snprintf(distPadded, sizeof(distPadded), "%7.1f", dist);
+
+    int   bInt = (int)r.bearing; if (bInt < 0) bInt += 360; if (bInt > 359) bInt -= 360;
+    char  brg[4]; snprintf(brg, sizeof(brg), "%3d", bInt);
+
+    char cd[3]; compass2(r.bearing, cd);
+
+    char infoLine[96];
+    snprintf(infoLine, sizeof(infoLine), "%s%skm %s%s %s",
+             csPadded, distPadded, brg, cd, r.country);
+
+    // zebra: two bands (model + info) share same background
+    const bool dark = (shown % 2 == 0);
+
+    // Model band
+    paint.Clear(UNCOLORED);
+    if (dark) paint.DrawFilledRectangle(0, 0, kScreenW-1, kLineH-1, COLORED);    // black stripe
+    paint.DrawStringAt(5, 5, r.model, &Font16, dark ? UNCOLORED : COLORED);      // white on black / black on white
+    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
+    y += kLineH;
+
+    // Info band
+    paint.Clear(UNCOLORED);
+    if (dark) paint.DrawFilledRectangle(0, 0, kScreenW-1, kLineH-1, COLORED);
+    paint.DrawStringAt(5, 5, infoLine, &Font16, dark ? UNCOLORED : COLORED);
+    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
+    y += kLineH;
+
+    shown++;
+  }
+
+  // Clear leftover bands so no stale pixels remain
+  while (y < kScreenH) {
+    paint.Clear(UNCOLORED);
+    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, std::min(y + kLineH, kScreenH));
+    y += kLineH;
+  }
+
+  // Present once
+  epd.TurnOnDisplay_Partial();
 }
 
 void pageUp() {
   if (sMode != HOLD_MODE) return;
-  recalcPagingFromActive(sTotalActive);
+  recalcPagingFromActive(countActiveAircraft());
   if (sCurrentPage < sTotalPages) sCurrentPage++;
-  drawHoldPageFullBuffer();         // one FULL refresh
+  drawHoldPagePartial();
+  //holdMaybeFullRefresh();
 }
 
 void pageDown() {
   if (sMode != HOLD_MODE) return;
-  recalcPagingFromActive(sTotalActive);
+  recalcPagingFromActive(countActiveAircraft());
   if (sCurrentPage > 1) sCurrentPage--;
-  drawHoldPageFullBuffer();         // one FULL refresh
+  drawHoldPagePartial();
+  //holdMaybeFullRefresh();
 }
 
 void redrawHoldPageFull() {

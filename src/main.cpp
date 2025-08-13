@@ -131,26 +131,28 @@ void loop() {
     }
   }
 
+  // UP
   if (readButtonFalling(UP_BUTTON_PIN, upLast, upLastChange)) {
     if (getDisplayMode() != HOLD_MODE) {
-      setDisplayMode(HOLD_MODE);
-      redrawHoldPageFull();
+      setDisplayMode(HOLD_MODE);   // now this ALSO draws page 1
     } else {
-      pageDown();
+      pageDown();                  // previous page (does partial draw inside)
     }
   }
 
+  // DOWN
   if (readButtonFalling(DOWN_BUTTON_PIN, downLast, downLastChange)) {
     if (getDisplayMode() != HOLD_MODE) {
-      setDisplayMode(HOLD_MODE);
-      pageUp();
+      setDisplayMode(HOLD_MODE);   // enters HOLD and draws page 1
+      pageUp();                    // go to page 2 right away if you prefer
     } else {
-      pageUp();
+      pageUp();                    // next page
     }
   }
 
+  // EXIT to LIVE
   if (readButtonFalling(BUTTON_PIN, exitLast, exitLastChange)) {
-    setDisplayMode(LIVE_MODE);
+    setDisplayMode(LIVE_MODE);     // draws immediately
   }
 
   if (WiFi.status() != WL_CONNECTED) {

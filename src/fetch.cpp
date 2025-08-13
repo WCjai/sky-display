@@ -117,7 +117,7 @@ String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
 // ---------------- Main fetch ----------------
 void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom, OpenSkyAuthClient& auth) {
   static bool isBusy = false;
-  static bool lastHadAircraft = true;
+  static bool lastHadAircraft = true;   // track LIVE-only clears
   if (isBusy) return;
   isBusy = true;
 
@@ -136,7 +136,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
 
   HTTPClient http;
   http.setTimeout(20000);
-  http.useHTTP10(true);                       // helps avoid chunked issues
+  http.useHTTP10(true);
   http.begin(url);
   http.addHeader("Authorization", "Bearer " + auth.getAccessToken());
   http.addHeader("Connection", "close");
@@ -149,7 +149,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     return;
   }
 
-  // Parse entire JSON from stream (no filters; keep memory generous)
+  // Parse JSON
   DynamicJsonDocument doc(64 * 1024);
   DeserializationError jerr = deserializeJson(doc, http.getStream());
   if (jerr) {
@@ -225,7 +225,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       String model = fetchAircraftModel(icao24, auth);
       addToCache(icao24, model, callsign, country, dist, brng);
 
-      // NEW: mark the freshly inserted row as active for this cycle
+      // mark new row active
       if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         for (int i = 0; i < MAX_CACHE_SIZE; i++) {
           if (aircraftCache[i].icao24 == icao24) { 
@@ -237,7 +237,6 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       }
     }
   }
-
 
   // ---- Phase 3: purge inactive ----
   bool locked3 = false;
@@ -254,7 +253,6 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     if (totalAircraft == 0) {
       if (lastHadAircraft) { epd.Init(); epd.Clear(); }
       drawNoAircraftScreen(timestamp);
-      //drawNoAircraftScreen(timestamp);
       lastHadAircraft = false;
     } else {
       if (!lastHadAircraft) { epd.Init(); epd.Clear(); }
@@ -262,7 +260,9 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       lastHadAircraft = true;
     }
   }
+  // else (HOLD_MODE): DO NOT touch EPD here. We only updated the cache above.
 
   http.end();
   isBusy = false;
 }
+
