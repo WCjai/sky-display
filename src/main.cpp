@@ -14,8 +14,9 @@
 OpenSkyAuthClient* pAuthClient = nullptr;
 
 #define BUTTON_PIN       2
-#define UP_BUTTON_PIN    32
-#define DOWN_BUTTON_PIN  33
+#define UP_BUTTON_PIN    33
+#define DOWN_BUTTON_PIN  32
+#define EPD_ACTIVITY_LED_PIN  25
 
 const unsigned long DEBOUNCE_MS = 80;
 static bool upLast = HIGH, downLast = HIGH, exitLast = HIGH;
@@ -64,6 +65,8 @@ void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
   pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(EPD_ACTIVITY_LED_PIN, OUTPUT);
+  digitalWrite(EPD_ACTIVITY_LED_PIN, LOW); // off
   attachInterrupt(digitalPinToInterrupt(UP_BUTTON_PIN),   onUpPress,   FALLING);
   attachInterrupt(digitalPinToInterrupt(DOWN_BUTTON_PIN), onDownPress, FALLING);
 

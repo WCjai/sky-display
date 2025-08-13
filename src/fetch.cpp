@@ -250,16 +250,16 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
 
   // ---- Draw only in LIVE ----
   if (getDisplayMode() == LIVE_MODE) {
+    ensurePartialPrimed();                 // stay in fast/partial
     if (totalAircraft == 0) {
-      if (lastHadAircraft) { epd.Init(); epd.Clear(); }
-      drawNoAircraftScreen(timestamp);
+      drawNoAircraftScreen(timestamp);     // partial write + TurnOnDisplay_Partial()
       lastHadAircraft = false;
     } else {
-      if (!lastHadAircraft) { epd.Init(); epd.Clear(); }
       drawAircraftInfoToDisplay_Partial(timeStr, totalAircraft);
       lastHadAircraft = true;
     }
   }
+
   // else (HOLD_MODE): DO NOT touch EPD here. We only updated the cache above.
 
   http.end();

@@ -43,6 +43,9 @@ static constexpr int kScreenH = 300;
 static constexpr int kLineH   = 27;
 static bool sHoldPartialInit = false;
 
+static bool sPanelPrimed = false;       // we have a valid base loaded
+static bool sFastLUT     = false;       // panel is in fast/partial init
+
 // compact snapshot — no Arduino String on heap in draw path
 struct RowView {
   char   icao24[9];     // 8 + NUL
@@ -75,6 +78,22 @@ static int countActiveAircraft() {
     if (aircraftCache[i].icao24 != "" && aircraftCache[i].distance >= 0) cnt++;
   }
   return cnt;
+}
+
+void ensurePartialPrimed() {
+  if (!sPanelPrimed) {
+    epd.Init_Fast(Seconds_1S);          // fast LUT for partial updates
+    // Use whatever is currently on screen as “base”: we can’t read it back,
+    // so we push a white base ONCE. After this, stay in partial.
+    full_paint.Clear(UNCOLORED);
+    epd.Display_Base(full_paint.GetImage());
+    sPanelPrimed = true;
+    sFastLUT     = true;
+  } else if (!sFastLUT) {
+    // We were in normal LUT — switch to fast without disturbing base
+    epd.Init_Fast(Seconds_1S);
+    sFastLUT = true;
+  }
 }
 
 static void holdMaybeFullRefresh() {
@@ -507,40 +526,35 @@ DisplayMode getDisplayMode() { return sMode; }
 
 void setDisplayMode(DisplayMode m) {
   // Guard: don’t enter HOLD when <5 aircraft
-  if (m == HOLD_MODE && getActiveCount() < 5) {
-    // Optional: flash a small message if you want
-    return;
-  }
+  if (m == HOLD_MODE && getActiveCount() < 5) return;
 
   if (sMode == m) {
-    // If we’re already in HOLD and the user presses again while nothing is drawn,
-    // force a draw so the first press still shows something.
+    // If pressing again in HOLD, redraw current page
     if (m == HOLD_MODE) {
       recalcPagingFromActive(getActiveCount());
       sCurrentPage = max(1, min(sCurrentPage, sTotalPages));
+      ensurePartialPrimed();
       drawHoldPagePartial();
     }
     return;
   }
 
+  // SWITCH
   sMode = m;
 
   if (sMode == HOLD_MODE) {
-    // Prep partial mode and draw immediately (page 1)
-    epd.Init_Fast(Seconds_1S);       // fast LUT for partials
-    full_paint.Clear(UNCOLORED);
-    epd.Display_Base(full_paint.GetImage());  // stable base for partial updates
-
+    // Stay in partial, do NOT clear or push a white base here
+    ensurePartialPrimed();
     recalcPagingFromActive(getActiveCount());
     sCurrentPage = 1;
-    drawHoldPagePartial();            // <-- draw on first press
+    drawHoldPagePartial();                // partial-only
   } else {
-    // Back to LIVE: draw right away using last timestamp
-    epd.Init(); 
-    epd.Clear();
+    // LIVE mode: partial-only as well (no Clear)
+    ensurePartialPrimed();
     drawAircraftInfoToDisplay_Partial(sLastTimeStr, 0);
   }
 }
+
 
 void drawHoldPagePartial() {
   // Build a stable snapshot (so paging doesn’t change mid-draw)
