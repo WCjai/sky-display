@@ -497,6 +497,8 @@ void Epd::Display_Partial_Not_refresh(unsigned char* Image, unsigned int  Xstart
 	SendData((Ystart>>8) & 0x01);
 
 
+
+
 	SendCommand(0x24);   //Write Black and White image to RAM
 	for (i = 0; i < IMAGE_COUNTER; i++) {
 		SendData(Image[i]);
