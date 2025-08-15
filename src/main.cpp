@@ -114,7 +114,7 @@ void setup() {
   
 
   // Optional initial fetch
-  fetchOpenSkyDataWithBoundingBox(HOME_LAT, HOME_LON, ZOOM, *pAuthClient);
+  //fetchOpenSkyDataWithBoundingBox(HOME_LAT, HOME_LON, ZOOM, *pAuthClient);
 
   // ↑↑ Increased stack from 8192 → 16384 bytes ↑↑
   xTaskCreatePinnedToCore(

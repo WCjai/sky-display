@@ -125,82 +125,129 @@ static String normalizeManufacturer(const String& in) {
 }
 
 
-// HexDB: RegisteredOwners Manufacturer Type
-// fetch.cpp
-// Make sure this file already has: #include "display.h"
-extern sFONT Font16; // usually declared in the EPD fonts; already available via display.h
+// Normalize manufacturers that are notoriously long
 
-// --- Replace your fetchFromHexDB(...) with this version ---
+
+// Collapse multiple spaces to single spaces
+static void collapseSpaces(String& s) {
+  String out; out.reserve(s.length());
+  bool ws = false;
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (c == ' ') {
+      if (!ws) { out += ' '; ws = true; }
+    } else {
+      out += c; ws = false;
+    }
+  }
+  s = out;
+}
+
+// Join up to three parts with single spaces (skip empties)
+static String join3(const String& a, const String& b, const String& c) {
+  String out;
+  if (a.length()) out += a;
+  if (b.length()) { if (out.length()) out += " "; out += b; }
+  if (c.length()) { if (out.length()) out += " "; out += c; }
+  if (out.length()) collapseSpaces(out);
+  return out;
+}
+
+// Ellipsize to maxChars (try to cut at a space near the end)
+static String ellipsize(const String& s, int maxChars) {
+  if ((int)s.length() <= maxChars) return s;
+  if (maxChars <= 1) return "…";
+  int keep = maxChars - 1;
+  String cut = s.substring(0, keep);
+  int sp = cut.lastIndexOf(' ');
+  if (sp >= keep - 8 && sp >= 8) cut = cut.substring(0, sp);
+  cut += "…";
+  return cut;
+}
+
+
+// ---- Replacement for fetchFromHexDB ----
 static String fetchFromHexDB(const String& icao24) {
   HTTPClient http;
   http.setTimeout(15000);
-  String hex = icao24;
-  hex.toLowerCase();  // HexDB expects lowercase
+
+  String hex = icao24; hex.toLowerCase();                // HexDB expects lowercase
   http.begin("https://hexdb.io/api/v1/aircraft/" + hex);
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString();
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(3072);
     DeserializationError err = deserializeJson(doc, payload);
     if (!err) {
-      // HexDB might return {"status":"404","error":"..."} for unknown hex
       if (doc.containsKey("error")) { http.end(); return ""; }
 
+      // Pull fields
       String owners  = doc["RegisteredOwners"] | "";
       String opflag  = doc["OperatorFlagCode"] | "";
       String manuf   = doc["Manufacturer"]     | "";
-      String type    = doc["Type"]             | doc["ICAOTypeCode"] | "";
+      String type    = doc["Type"]             | "";
+      String icao    = doc["ICAOTypeCode"]     | "";
 
-      owners.trim(); opflag.trim(); manuf.trim(); type.trim();
+      owners.trim(); opflag.trim(); manuf.trim(); type.trim(); icao.trim();
 
-      // Normalize manufacturer (e.g., "Avions de Transport Regional" -> "ATR")
+      // Sanitize manufacturer
       String manufN = normalizeManufacturer(manuf);
 
-      // Build two candidates: FULL (RegisteredOwners...) and SHORT (OperatorFlagCode...)
-      auto buildLine = [](const String& ownerLike,
-                          const String& manufLike,
-                          const String& typeLike) -> String {
-        String out;
-        if (ownerLike.length()) out += ownerLike;
-        if (manufLike.length()) { if (out.length()) out += " "; out += manufLike; }
-        if (typeLike.length())  { if (out.length()) out += " "; out += typeLike; }
-        return out;
+      // Width budget for model line (Font16 at x=5 on 400px panel)
+      const int screenW = 400, leftPad = 5, rightPad = 5;
+      const int maxChars = max(8, (screenW - leftPad - rightPad) / Font16.Width);
+      auto fits = [&](const String& s){ return (int)s.length() <= maxChars; };
+
+      // Priority: keep airline (owners) as long as possible, then try opflag
+      // Sequence tries: 
+      //   RO+Manuf+Type → RO+Manuf+ICAO → RO+ManufN+Type → RO+ManufN+ICAO
+      //   OPF+Manuf+Type → OPF+Manuf+ICAO → OPF+ManufN+Type → OPF+ManufN+ICAO
+      //   (still too long?) RO+ManufN → RO+ICAO → OPF+ManufN → OPF+ICAO
+      //   If still long: RO+Type → OPF+Type → ManufN+ICAO → OPF → RO → ICAO → Type
+      struct Cand { String a,b,c; };
+      Cand seq[] = {
+        { owners, manuf,  type },
+        { owners, manuf,  icao },
+        { owners, manufN, type },
+        { owners, manufN, icao },
+
+        { opflag, manuf,  type },
+        { opflag, manuf,  icao },
+        { opflag, manufN, type },
+        { opflag, manufN, icao },
+
+        { owners, manufN, ""   },
+        { owners, "",     icao },
+        { opflag, manufN, ""   },
+        { opflag, "",     icao },
+
+        { owners, "",     type },
+        { opflag, "",     type },
+        { manufN, "",     icao },
+        { opflag, "",     ""   },
+        { owners, "",     ""   },
+        { "",      "",    icao },
+        { "",      "",    type }
       };
 
-      String fullLine  = buildLine(owners, manufN, type);
-      String shortLine = buildLine(opflag.length() ? opflag : owners, manufN, type);
-
-      // Compute character budget for the MODEL band (Font16 on 400px, ~5px margins)
-      extern sFONT Font16;               // from display.h
-      const int screenW = 400;
-      const int leftPad = 5;
-      const int rightPad = 5;
-      int maxChars = (screenW - leftPad - rightPad) / Font16.Width;
-      if (maxChars < 8) maxChars = 8;    // guard
-
-      auto fits = [&](const String& s) { return (int)s.length() <= maxChars; };
-
-      String chosen;
-      if (fits(fullLine)) {
-        chosen = fullLine;
-      } else if (fits(shortLine)) {
-        chosen = shortLine;
-      } else {
-        // Neither fits: prefer SHORT and ellipsize
-        String base = shortLine.length() ? shortLine : fullLine;
-        if ((int)base.length() > maxChars) {
-          int keep = maxChars > 1 ? (maxChars - 1) : 1;  // room for "…"
-          chosen = base.substring(0, keep);
-          int sp = chosen.lastIndexOf(' ');
-          if (sp >= keep - 6 && sp >= 8) chosen = chosen.substring(0, sp);
-          chosen += "…";
-        } else {
-          chosen = base;
-        }
+      for (const auto& c : seq) {
+        String s = join3(c.a, c.b, c.c);
+        if (s.length() && fits(s)) { http.end(); return s; }
       }
 
+      // Nothing fit: pick the most-informative short base that preserves airline,
+      // then ellipsize to fit
+      String base =
+        join3(opflag, manufN, icao);             // OPF + manuf(short) + ICAO
+      if (!base.length()) base = join3(opflag, "", icao);
+      if (!base.length()) base = opflag;
+      if (!base.length()) base = join3(owners, manufN, icao);
+      if (!base.length()) base = icao;
+      if (!base.length()) base = type;
+      if (!base.length()) base = "Unknown";
+
       http.end();
-      return chosen;
+      return ellipsize(base, maxChars);
     }
   }
   http.end();
@@ -209,34 +256,149 @@ static String fetchFromHexDB(const String& icao24) {
 
 
 
-// String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
-//   String cached = lookupCachedModel(icao24);
-//   if (cached.length()) return cached;
 
-//   // String model = fetchFromPlaneSpotters(icao24);
-//   // if (model == "") model = fetchFromOpenSkyMeta(icao24, auth);
-//   // if (model == "") model = "Unknown";
+// --- ADSB.one: fill callsign from HEX when OpenSky has none ---
+// === ADSB.one: fill callsign from HEX when OpenSky has none ===
+static String fetchCallsignFromADSBOne(const String& icao24) {
+  HTTPClient http;
+  http.setTimeout(12000);
 
-//   String model = fetchFromOpenSkyMeta(icao24, auth);
-//   if (model == "") model = fetchFromPlaneSpotters(icao24);
-//   if (model == "") model = "Unknown";
-//   addToCache(icao24, model);
-//   return model;
-// }
+  String hex = icao24; hex.toUpperCase();
+  http.begin("https://api.adsb.one/v2/hex/" + hex);
+  int code = http.GET();
+  if (code != 200) { http.end(); return ""; }
+
+  DynamicJsonDocument doc(8192);
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) return "";
+
+  // Payload shape (your sample):
+  // { "ac":[ { "flight":"UAE31T  ", "desc":"BOEING 777-300ER", "t":"B77W", ... } ], ... }
+  JsonArray ac = doc["ac"].as<JsonArray>();
+  if (ac.isNull() || ac.size() == 0) return "";
+
+  String cs = (const char*)(ac[0]["flight"] | "");
+  cs.trim();                  // remove trailing spaces in "UAE31T  "
+  return cs;
+}
+
+// === ADSB.one: model fallback via 'desc' (else 't' ICAO type) ===
+static String fetchModelFromADSBOneDesc(const String& icao24) {
+  HTTPClient http;
+  http.setTimeout(12000);
+
+  String hex = icao24; hex.toUpperCase();
+  http.begin("https://api.adsb.one/v2/hex/" + hex);
+  int code = http.GET();
+  if (code != 200) { http.end(); return ""; }
+
+  DynamicJsonDocument doc(8192);
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) return "";
+
+  JsonArray ac = doc["ac"].as<JsonArray>();
+  if (ac.isNull() || ac.size() == 0) return "";
+
+  // Prefer 'desc' (full name), otherwise 't' (ICAO type code)
+  String model = (const char*)(ac[0]["desc"] | "");
+  if (!model.length()) model = (const char*)(ac[0]["t"] | "");
+  model.trim();
+  return model;
+}
+
+
 
 String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
   String cached = lookupCachedModel(icao24);
   if (cached.length()) return cached;
 
-  // Try OpenSky (operator + model), then HexDB (RegisteredOwners Manufacturer Type), then PlaneSpotters
+  // Try HexDB -> OpenSky -> ADSB.one(desc/t) -> PlaneSpotters
   String model = fetchFromHexDB(icao24);
-  if (model == "") model =  fetchFromOpenSkyMeta(icao24, auth);      // <-- returns "Owners Maker Type"
-  if (model == "") model = fetchFromPlaneSpotters(icao24);
+  if (model == "") model = fetchFromOpenSkyMeta(icao24, auth);
+  if (model == "") model =   fetchFromPlaneSpotters(icao24);// <-- NEW
+  if (model == "") model = fetchModelFromADSBOneDesc(icao24);
   if (model == "") model = "Unknown";
 
   addToCache(icao24, model);
   return model;
 }
+
+// Turn "BLRTRZ" -> "BLR-TRZ" if it's exactly two IATA codes stuck together.
+// Leaves everything else (e.g., "KLM879", "AAA→BBB") unchanged.
+static String dashIfConcatenatedAirports(const String& in) {
+  String s = in; s.trim();
+  if (!s.length()) return s;
+
+  // if it already contains a separator, leave it
+  if (s.indexOf('-') >= 0 || s.indexOf('→') >= 0) return s;
+
+  // make an uppercase copy for checks; return original casing in output
+  String u = s; u.toUpperCase();
+
+  // must be exactly 6 A–Z letters
+  if (u.length() != 6) return s;
+  for (int i = 0; i < 6; ++i) {
+    char c = u[i];
+    if (c < 'A' || c > 'Z') return s;
+  }
+
+  // looks like two IATA codes: insert dash and uppercase the codes
+  return u.substring(0,3) + "-" + u.substring(3,6);
+}
+
+// Make "AAA→BBB" using IATA if present, else ICAO, else city/name.
+// Returns "" if not enough info.
+static String routeLabelFromFlightroute(JsonObject fr) {
+  JsonObject o = fr["origin"];
+  JsonObject d = fr["destination"];
+  if (o.isNull() || d.isNull()) return "";
+
+  String os = (String)(o["iata_code"] | "");
+  String ds = (String)(d["iata_code"] | "");
+  if (!os.length()) os = (String)(o["icao_code"] | "");
+  if (!ds.length()) ds = (String)(d["icao_code"] | "");
+  if (os.length() && ds.length()) return os + "-" + ds;
+
+
+  return "";
+}
+
+// Query ADSBdb by callsign; return "SRC→DEST" or "" if unknown.
+static String fetchRouteLabelForCallsign(String callsign) {
+  callsign.trim();
+  callsign.replace(" ", "");  // ADS-B callsigns sometimes include spaces
+  if (!callsign.length()) return "";
+
+  HTTPClient http;
+  http.setTimeout(12000);
+  http.begin("https://api.adsbdb.com/v0/callsign/" + callsign);
+  int code = http.GET();
+  if (code != 200) { http.end(); return ""; }
+
+  // Response: { "response": { "flightroute": { origin:{...}, destination:{...}, ... } } }
+  DynamicJsonDocument doc(4096);
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) return "";
+
+  JsonObject fr = doc["response"]["flightroute"];
+  if (fr.isNull()) return "";
+  return routeLabelFromFlightroute(fr);
+}
+
+// Decide what to show: route if available, else callsign, else ICAO24.
+static String bestFlightLabel(const String& icao24, const String& callsign) {
+  String route = fetchRouteLabelForCallsign(callsign);
+  if (route.length()) return route;              // e.g., "BLR→TRZ" or "CityA-CityB"
+
+  String cs = callsign; cs.trim();
+  if (cs.length()) return dashIfConcatenatedAirports(cs);  // <- HERE
+
+  return icao24;
+}
+
 // ---------------- Main fetch ----------------
 void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom, OpenSkyAuthClient& auth) {
   static bool isBusy = false;
@@ -346,20 +508,20 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       float  lat      = st[6] | 0.0f;
       if (icao24 == "" || lat == 0.0f || lon == 0.0f) continue;
 
-      bool present = false;
-      if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        for (int i = 0; i < MAX_CACHE_SIZE; i++) {
-          if (aircraftCache[i].icao24 == icao24 && aircraftCache[i].active) { present = true; break; }
-        }
-        if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+      // Fill callsign first if OpenSky didn't provide it
+      callsign.trim();
+      if (!callsign.length()) {
+        callsign = fetchCallsignFromADSBOne(icao24);  // <-- NEW
       }
-      if (present) continue;
 
+      // (rest unchanged)
       float dist = haversineDistance(centerLat, centerLon, lat, lon);
       float brng = calculateBearing(centerLat, centerLon, lat, lon);
 
-      String model = fetchAircraftModel(icao24, auth);
-      addToCache(icao24, model, callsign, country, dist, brng);
+      String model       = fetchAircraftModel(icao24, auth);
+      String flightLabel = bestFlightLabel(icao24, callsign);  // will query ADSBdb with filled callsign
+
+      addToCache(icao24, model, flightLabel, country, dist, brng);
 
       // mark new row active
       if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
