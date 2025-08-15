@@ -23,6 +23,7 @@ void initDisplayMutex();
 void setDisplayMode(DisplayMode m);      // entering HOLD: no draw; entering LIVE: draws once
 DisplayMode getDisplayMode();
 void drawHoldPagePartial();   
+void drawTooManyAircraftScreen(int total);
 
 void pageUp();                           // HOLD: next page (one FULL refresh)
 void pageDown();                         // HOLD: prev page (one FULL refresh)

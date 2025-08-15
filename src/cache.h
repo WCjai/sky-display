@@ -3,7 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#define MAX_CACHE_SIZE 30
+#define MAX_CACHE_SIZE 50
 
 struct AircraftCacheEntry {
   String icao24;   // hex id

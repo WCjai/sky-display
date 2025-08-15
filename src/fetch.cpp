@@ -102,18 +102,141 @@ static String fetchFromOpenSkyMeta(const String& icao24, OpenSkyAuthClient& auth
   return "";
 }
 
+// --- Add this helper near the top of fetch.cpp ---
+static String normalizeManufacturer(const String& in) {
+  String s = in; 
+  s.trim();
+  if (!s.length()) return s;
+
+  String lower = s;
+  lower.toLowerCase();
+
+  // Map "Avions de Transport Regional" (and "Régional") to "ATR"
+  if (lower.indexOf("avions de transport regional") != -1 ||
+      lower.indexOf("avions de transport régional") != -1) {
+    return "ATR";
+  }
+
+  // (Optional place to add more mappings later)
+  // if (lower.indexOf("airbus industrie") != -1) return "Airbus";
+  // if (lower.indexOf("the boeing company") != -1) return "Boeing";
+
+  return s;
+}
+
+
+// HexDB: RegisteredOwners Manufacturer Type
+// fetch.cpp
+// Make sure this file already has: #include "display.h"
+extern sFONT Font16; // usually declared in the EPD fonts; already available via display.h
+
+// --- Replace your fetchFromHexDB(...) with this version ---
+static String fetchFromHexDB(const String& icao24) {
+  HTTPClient http;
+  http.setTimeout(15000);
+  String hex = icao24;
+  hex.toLowerCase();  // HexDB expects lowercase
+  http.begin("https://hexdb.io/api/v1/aircraft/" + hex);
+  int code = http.GET();
+  if (code == 200) {
+    String payload = http.getString();
+    DynamicJsonDocument doc(2048);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err) {
+      // HexDB might return {"status":"404","error":"..."} for unknown hex
+      if (doc.containsKey("error")) { http.end(); return ""; }
+
+      String owners  = doc["RegisteredOwners"] | "";
+      String opflag  = doc["OperatorFlagCode"] | "";
+      String manuf   = doc["Manufacturer"]     | "";
+      String type    = doc["Type"]             | doc["ICAOTypeCode"] | "";
+
+      owners.trim(); opflag.trim(); manuf.trim(); type.trim();
+
+      // Normalize manufacturer (e.g., "Avions de Transport Regional" -> "ATR")
+      String manufN = normalizeManufacturer(manuf);
+
+      // Build two candidates: FULL (RegisteredOwners...) and SHORT (OperatorFlagCode...)
+      auto buildLine = [](const String& ownerLike,
+                          const String& manufLike,
+                          const String& typeLike) -> String {
+        String out;
+        if (ownerLike.length()) out += ownerLike;
+        if (manufLike.length()) { if (out.length()) out += " "; out += manufLike; }
+        if (typeLike.length())  { if (out.length()) out += " "; out += typeLike; }
+        return out;
+      };
+
+      String fullLine  = buildLine(owners, manufN, type);
+      String shortLine = buildLine(opflag.length() ? opflag : owners, manufN, type);
+
+      // Compute character budget for the MODEL band (Font16 on 400px, ~5px margins)
+      extern sFONT Font16;               // from display.h
+      const int screenW = 400;
+      const int leftPad = 5;
+      const int rightPad = 5;
+      int maxChars = (screenW - leftPad - rightPad) / Font16.Width;
+      if (maxChars < 8) maxChars = 8;    // guard
+
+      auto fits = [&](const String& s) { return (int)s.length() <= maxChars; };
+
+      String chosen;
+      if (fits(fullLine)) {
+        chosen = fullLine;
+      } else if (fits(shortLine)) {
+        chosen = shortLine;
+      } else {
+        // Neither fits: prefer SHORT and ellipsize
+        String base = shortLine.length() ? shortLine : fullLine;
+        if ((int)base.length() > maxChars) {
+          int keep = maxChars > 1 ? (maxChars - 1) : 1;  // room for "…"
+          chosen = base.substring(0, keep);
+          int sp = chosen.lastIndexOf(' ');
+          if (sp >= keep - 6 && sp >= 8) chosen = chosen.substring(0, sp);
+          chosen += "…";
+        } else {
+          chosen = base;
+        }
+      }
+
+      http.end();
+      return chosen;
+    }
+  }
+  http.end();
+  return "";
+}
+
+
+
+// String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
+//   String cached = lookupCachedModel(icao24);
+//   if (cached.length()) return cached;
+
+//   // String model = fetchFromPlaneSpotters(icao24);
+//   // if (model == "") model = fetchFromOpenSkyMeta(icao24, auth);
+//   // if (model == "") model = "Unknown";
+
+//   String model = fetchFromOpenSkyMeta(icao24, auth);
+//   if (model == "") model = fetchFromPlaneSpotters(icao24);
+//   if (model == "") model = "Unknown";
+//   addToCache(icao24, model);
+//   return model;
+// }
+
 String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
   String cached = lookupCachedModel(icao24);
   if (cached.length()) return cached;
 
-  String model = fetchFromPlaneSpotters(icao24);
-  if (model == "") model = fetchFromOpenSkyMeta(icao24, auth);
+  // Try OpenSky (operator + model), then HexDB (RegisteredOwners Manufacturer Type), then PlaneSpotters
+  String model = fetchFromHexDB(icao24);
+  if (model == "") model =  fetchFromOpenSkyMeta(icao24, auth);      // <-- returns "Owners Maker Type"
+  if (model == "") model = fetchFromPlaneSpotters(icao24);
   if (model == "") model = "Unknown";
 
   addToCache(icao24, model);
   return model;
 }
-
 // ---------------- Main fetch ----------------
 void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom, OpenSkyAuthClient& auth) {
   static bool isBusy = false;
@@ -163,6 +286,19 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   JsonArray states = doc["states"].as<JsonArray>();
   int totalAircraft = states.isNull() ? 0 : states.size();
   Serial.printf("[fetch] parsed states: %d\n", totalAircraft);
+  if (totalAircraft > MAX_AIRCRAFT_LIMIT) {
+    // Draw persistent error screen
+    drawTooManyAircraftScreen(totalAircraft);
+
+    // Clean up HTTP and mark not busy
+    http.end();
+    isBusy = false;
+
+    // HARD STOP: suspend this FreeRTOS task (self-suspend)
+    // No more fetching until reboot or manual resume.
+    vTaskSuspend(nullptr);
+    return;
+  }
 
   // Build time string for LIVE header
   char timeStr[64];

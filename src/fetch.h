@@ -3,6 +3,10 @@
 #include <Arduino.h>
 #include "OpenSkyAuthClient.h"
 #include "cache.h"
+#include <freertos/task.h> 
+
+#define MAX_AIRCRAFT_LIMIT 100
+
 
 // View window based on zoom & home position
 struct BoundingBox {
