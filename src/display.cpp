@@ -616,36 +616,106 @@ static inline void DrawHLine(Paint& p, int x1, int x2, int y, int thickness, int
 }
 
 // simple rounded-rect outline (radius 4..6 looks nice at 27px band height)
-static void DrawRoundedRectOutline(Paint& p, int x, int y, int w, int h, int r, int thickness, int color) {
-  if (r < 1) r = 1;
-  if (r*2 > w) r = w/2;
-  if (r*2 > h) r = h/2;
+// Helpers you already have:
+// void DrawHLine(Paint& p, int x1, int x2, int y, int thickness, int color);
+// void DrawVLine(Paint& p, int x, int y1, int y2, int thickness, int color);
+// p.DrawAbsolutePixel(x, y, color);
 
-  // straight edges
-  DrawHLine(p, x + r, x + w - r - 1, y,             thickness, color); // top
-  DrawHLine(p, x + r, x + w - r - 1, y + h - 1 - thickness + 1, thickness, color); // bottom
-  DrawVLine(p, x,             y + r, y + h - r - 1, thickness, color); // left
-  DrawVLine(p, x + w - thickness, y + r, y + h - r - 1, thickness, color); // right
+static inline void plotTL(Paint& p, int cx, int cy, int x, int y, int color) {
+  p.DrawAbsolutePixel(cx - x, cy - y, color);
+  p.DrawAbsolutePixel(cx - y, cy - x, color);
+}
+static inline void plotTR(Paint& p, int cx, int cy, int x, int y, int color) {
+  p.DrawAbsolutePixel(cx + x, cy - y, color);
+  p.DrawAbsolutePixel(cx + y, cy - x, color);
+}
+static inline void plotBL(Paint& p, int cx, int cy, int x, int y, int color) {
+  p.DrawAbsolutePixel(cx - x, cy + y, color);
+  p.DrawAbsolutePixel(cx - y, cy + x, color);
+}
+static inline void plotBR(Paint& p, int cx, int cy, int x, int y, int color) {
+  p.DrawAbsolutePixel(cx + x, cy + y, color);
+  p.DrawAbsolutePixel(cx + y, cy + x, color);
+}
 
-  // crude quarter arcs (symmetric pixels)
-  for (int i = 0; i < r; ++i) {
-    int dx = r - i;
-    int dy = (int)roundf((float)std::sqrt((float)r * r - dx * dx));
-    // top-left
-    p.DrawAbsolutePixel(x + r - dx, y + r - dy, color);
-    // top-right
-    p.DrawAbsolutePixel(x + w - r - 1 + dx - 1, y + r - dy, color);
-    // bottom-left
-    p.DrawAbsolutePixel(x + r - dx, y + h - r + dy - 1, color);
-    // bottom-right
-    p.DrawAbsolutePixel(x + w - r - 1 + dx - 1, y + h - r + dy - 1, color);
-  }
+static void drawQuarterCircleOutline(Paint& p, int cx, int cy, int r, int corner, int color) {
+  if (r <= 0) return;
+  int x = 0, y = r;
+  int d = 3 - 2 * r;  // midpoint circle
 
-  // thickness > 1: inflate inward
-  for (int t = 1; t < thickness; ++t) {
-    DrawRoundedRectOutline(p, x + t, y + t, w - 2*t, h - 2*t, r - (t>0?1:0), 1, color);
+  while (x <= y) {
+    switch (corner) {
+      case 0: plotTL(p, cx, cy, x, y, color); break; // TL
+      case 1: plotTR(p, cx, cy, x, y, color); break; // TR
+      case 2: plotBL(p, cx, cy, x, y, color); break; // BL
+      case 3: plotBR(p, cx, cy, x, y, color); break; // BR
+    }
+    if (d < 0) {
+      d += 4 * x + 6;
+    } else {
+      d += 4 * (x - y) + 10;
+      --y;
+    }
+    ++x;
   }
 }
+
+static void DrawRoundedRectOutline(Paint& p, int x, int y, int w, int h,
+                                   int r, int thickness, int color) {
+  if (w <= 0 || h <= 0 || thickness <= 0) return;
+
+  // clamp radius
+  if (r < 0) r = 0;
+  int rmax = (w < h ? w : h) / 2;
+  if (r > rmax) r = rmax;
+
+  // draw inward strokes for thickness
+  for (int t = 0; t < thickness; ++t) {
+    int xi = x + t;
+    int yi = y + t;
+    int wi = w - 2 * t;
+    int hi = h - 2 * t;
+    if (wi <= 0 || hi <= 0) break;
+
+    int rr = r - t;
+    if (rr < 0) rr = 0;
+
+    int left   = xi;
+    int right  = xi + wi - 1;
+    int top    = yi;
+    int bottom = yi + hi - 1;
+
+    // straight edges (avoid corner areas by starting/ending at +/- rr)
+    if (wi > 0) {
+      if (right - left + 1 > 0) {
+        // top & bottom
+        DrawHLine(p, left + rr, right - rr, top,    1, color);
+        DrawHLine(p, left + rr, right - rr, bottom, 1, color);
+      }
+    }
+    if (hi > 0) {
+      // left & right
+      DrawVLine(p, left,  top + rr, bottom - rr, 1, color);
+      DrawVLine(p, right, top + rr, bottom - rr, 1, color);
+    }
+
+    // corners: centers are inset by rr
+    if (rr > 0) {
+      int cxL = left  + rr;
+      int cxR = right - rr;
+      int cyT = top   + rr;
+      int cyB = bottom - rr;
+
+      drawQuarterCircleOutline(p, cxL, cyT, rr, 0, color); // TL
+      drawQuarterCircleOutline(p, cxR, cyT, rr, 1, color); // TR
+      drawQuarterCircleOutline(p, cxL, cyB, rr, 2, color); // BL
+      drawQuarterCircleOutline(p, cxR, cyB, rr, 3, color); // BR
+    }
+  }
+}
+
+
+
 
 // Parse "YYYY-MM-DD | HH:MM:SS" or "YYYY-MM-DD | hh:mm:ss AM/PM"
 static void ParseHeaderParts(const char* src,
@@ -830,8 +900,8 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
     // Direction — "dddXY"
     int  bInt = (int)r.bearing; if (bInt < 0) bInt += 360; if (bInt > 359) bInt -= 360;
     char brg[4];  snprintf(brg, sizeof(brg), "%3d", bInt);
-    char cd[3];   compass2(r.bearing, cd);
-    char dirStr[8]; snprintf(dirStr, sizeof(dirStr), "%s%s", brg, cd);
+    char cd[2];   compass2(r.bearing, cd);
+    char dirStr[6]; snprintf(dirStr, sizeof(dirStr), "%s%s", brg, cd);
 
     // --- Model band ---
     paint.Clear(UNCOLORED);
@@ -1095,8 +1165,8 @@ void drawHoldPagePartial() {
     // Direction "DDDcc"
     int  bInt = (int)r.bearing; if (bInt < 0) bInt += 360; if (bInt > 359) bInt -= 360;
     char brg[4];  snprintf(brg, sizeof(brg), "%3d", bInt);
-    char cd[3];   compass2(r.bearing, cd);
-    char dirStr[8]; snprintf(dirStr, sizeof(dirStr), "%s%2.2s", brg, cd);
+    char cd[2];   compass2(r.bearing, cd);
+    char dirStr[6]; snprintf(dirStr, sizeof(dirStr), "%s%2.2s", brg, cd);
 
     // Country trimmed to remaining width
     const int rightPad = 5;                          // keep a small right margin
