@@ -1,10 +1,13 @@
 #pragma once
-
 #include <Arduino.h>
 #include "epd4in2_V2.h"
 #include "epdpaint.h"
 #include "fonts.h"
 #include <ctime>
+
+// NEW: include FreeRTOS semaphore types
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define COLORED 0
 #define UNCOLORED 1
@@ -17,18 +20,19 @@ extern int TZ_minutes;
 
 enum DisplayMode { LIVE_MODE, HOLD_MODE };
 
+// NEW: declare the global display mutex (defined in display.cpp)
+extern SemaphoreHandle_t gDisplayMutex;
+
 // Call this once in setup() before any drawing:
 void initDisplayMutex();
 
-void setDisplayMode(DisplayMode m);      // entering HOLD: no draw; entering LIVE: draws once
+void setDisplayMode(DisplayMode m);
 DisplayMode getDisplayMode();
-void drawHoldPagePartial();   
+void drawHoldPagePartial();
 void drawTooManyAircraftScreen(int total);
-
-void pageUp();                           // HOLD: next page (one FULL refresh)
-void pageDown();                         // HOLD: prev page (one FULL refresh)
-void redrawHoldPageFull();               // HOLD: redraw current page (one FULL refresh)
-
+void pageUp();
+void pageDown();
+void redrawHoldPageFull();
 void drawStatusScreen(const char* msg);
 void drawStatusScreenwithline(const char* line1,
                               const char* line2 = "",
@@ -37,10 +41,7 @@ void drawStatusScreenwithline(const char* line1,
                               const char* line5 = "",
                               const char* line6 = "");
 void drawNoAircraftScreen(time_t timestamp);
-
-int getActiveCount();
-void ensurePartialPrimed(); 
-// Convenience: true if at least one aircraft is available
+int  getActiveCount();
+void ensurePartialPrimed();
 bool hasActiveAircraft();
-// LIVE list: batched partial (one refresh total). Does nothing if HOLD.
 void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraft);

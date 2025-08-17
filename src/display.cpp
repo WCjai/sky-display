@@ -24,9 +24,12 @@ static Paint time_paint(time_image, 400, kTimeBandH);
 
 
 // -------- Display mutex --------
-static SemaphoreHandle_t gDisplayMutex = nullptr;
+SemaphoreHandle_t gDisplayMutex = nullptr;
+
 void initDisplayMutex() {
-  if (!gDisplayMutex) gDisplayMutex = xSemaphoreCreateMutex();
+  if (!gDisplayMutex) {
+    gDisplayMutex = xSemaphoreCreateMutex();
+  }
 }
 struct ScopedDispLock {
   bool locked{false};

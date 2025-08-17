@@ -100,6 +100,9 @@ static String lookupCachedDisplayLabelByIcao(const String& icao24) {
   return "";
 }
 
+static bool routeCacheHas(const String& cs) {
+  return gRouteCache.find(cs) != gRouteCache.end();
+}
 
 BoundingBox getBoundingBox(float centerLat, float centerLon, int zoom) {
   float latSpan, lonSpan;
@@ -193,20 +196,6 @@ static String ellipsize(const String& s, int maxChars) {
   return cut;
 }
 
-// Turn "BLRTRZ" -> "BLR-TRZ" if it's exactly two IATA codes stuck together.
-static String dashIfConcatenatedAirports(const String& in) {
-  String s = in; s.trim();
-  if (!s.length()) return s;
-  if (s.indexOf('-') >= 0 || s.indexOf('→') >= 0) return s; // already formatted
-
-  String u = s; u.toUpperCase();
-  if (u.length() != 6) return s;
-  for (int i = 0; i < 6; ++i) {
-    char c = u[i];
-    if (c < 'A' || c > 'Z') return s;
-  }
-  return u.substring(0,3) + "-" + u.substring(3,6);
-}
 
 // ---------------- External APIs ----------------
 static String fetchFromPlaneSpotters(const String& icao24) {
@@ -216,7 +205,7 @@ static String fetchFromPlaneSpotters(const String& icao24) {
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString(); // small JSON — OK
-    DynamicJsonDocument doc(4096);
+    JsonDocument doc;
     if (!deserializeJson(doc, payload)) {
       JsonArray photos = doc["photos"].as<JsonArray>();
       if (!photos.isNull() && photos.size() > 0) {
@@ -250,7 +239,7 @@ static String fetchFromOpenSkyMeta(const String& icao24, OpenSkyAuthClient& auth
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString();
-    DynamicJsonDocument doc(2048);
+    JsonDocument doc;
     if (!deserializeJson(doc, payload)) {
       String model = doc["model"] | "";
       String oper  = doc["operator"] | "";
@@ -273,10 +262,13 @@ static String fetchFromHexDB(const String& icao24) {
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString();
-    DynamicJsonDocument doc(4096);
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, payload);
     if (!err) {
-      if (doc.containsKey("error")) { http.end(); return ""; }
+      if (!doc["error"].isNull()) {  // or simply: if (doc["error"])
+        http.end();
+        return "";
+      }
 
       // Pull fields
       String owners  = doc["RegisteredOwners"] | "";
@@ -357,8 +349,12 @@ static String fetchCallsignFromADSBOne(const String& icao24) {
   String hex = icao24; hex.toUpperCase();
 
   // cache first
-  if (String hit = getCachedCallsign(hex); hit.length() || hit == "") {
-    if (hit.length() || /* negative cached */ gHexToCallsign.count(hex)) return hit;
+  {
+    String hit = getCachedCallsign(hex);
+    // if we have a positive value OR a negative-cached miss, return it
+    if (hit.length() || gHexToCallsign.count(hex)) {
+      return hit;
+    }
   }
 
   if (!allowADSBCall()) return ""; // skip this tick if throttled
@@ -369,7 +365,7 @@ static String fetchCallsignFromADSBOne(const String& icao24) {
   int code = http.GET();
   if (code != 200) { http.end(); cacheCallsign(hex, ""); return ""; }
 
-  DynamicJsonDocument doc(8192);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) { cacheCallsign(hex, ""); return ""; }
@@ -393,7 +389,7 @@ static String fetchModelFromADSBOneDesc(const String& icao24) {
   int code = http.GET();
   if (code != 200) { http.end(); return ""; }
 
-  DynamicJsonDocument doc(8192);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) return "";
@@ -426,8 +422,12 @@ static String fetchRouteLabelForCallsign(String callsign) {
   if (!callsign.length()) return "";
 
   // route cache first
-  if (String hit = getCachedRoute(callsign); hit.length() || /* negative cached */ gRouteCache.count(callsign))
-    return hit;
+  {
+    String hit = getCachedRoute(callsign);
+    if (hit.length() || gRouteCache.count(callsign)) {
+      return hit;
+    }
+  }
 
   if (!allowRouteCall()) return ""; // skip for now
 
@@ -437,7 +437,7 @@ static String fetchRouteLabelForCallsign(String callsign) {
   int code = http.GET();
   if (code != 200) { http.end(); cacheRoute(callsign, ""); return ""; }
 
-  DynamicJsonDocument doc(4096);
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) { cacheRoute(callsign, ""); return ""; }
@@ -450,19 +450,31 @@ static String fetchRouteLabelForCallsign(String callsign) {
 
 
 static String bestFlightLabel(const String& icao24, const String& callsignIn) {
-  // 0) if we already computed a display label for this ICAO, use it
-  if (String v = lookupCachedDisplayLabelByIcao(icao24); v.length()) return v;
+  // 0) If we already computed a display label for this ICAO, use it
+  {
+    String v = lookupCachedDisplayLabelByIcao(icao24);
+    if (v.length()) return v;
+  }
 
-  // 1) normalize callsign
-  String cs = callsignIn; cs.trim(); cs.replace(" ", "");
-  if (!cs.length()) return icao24;   // no raw callsign → don’t try network
+  // 1) Normalize callsign
+  String cs = callsignIn;
+  cs.trim();
+  cs.replace(" ", "");
+  cs.toUpperCase();
+  if (!cs.length()) return icao24;   // no callsign → don’t try network
 
-  // 2) route cache → network (once) → fallback to raw callsign (maybe "BLRTRZ" → "BLR-TRZ")
-  if (String hit = getCachedRoute(cs); hit.length()) return hit;
+  // 2) Route cache → (respect negative cache) → network once → fallback to raw callsign
+  {
+    String hit = getCachedRoute(cs);   // returns "" if no positive cached value
+    if (hit.length() || routeCacheHas(cs)) return hit;  // if negative-cached, also return ""
+  }
 
-  if (String route = fetchRouteLabelForCallsign(cs); route.length()) return route;
+  // Not cached: fetch once (fetcher should cache hit/miss with TTL)
+  String route = fetchRouteLabelForCallsign(cs);
+  if (route.length()) return route;
 
-  return dashIfConcatenatedAirports(cs);
+  // 3) Fallback: just show the callsign you generated
+  return cs;
 }
 
 // ---------------- Public: aircraft model (old order, no caching "Unknown") ----------------
@@ -523,7 +535,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   }
 
   // Parse JSON (full parse, reliable)
-  DynamicJsonDocument doc(64 * 1024);
+  JsonDocument doc;
   DeserializationError jerr = deserializeJson(doc, http.getStream());
   if (jerr) {
     Serial.printf("[fetch] JSON error: %s\n", jerr.c_str());
