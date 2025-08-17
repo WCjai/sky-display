@@ -93,6 +93,7 @@ void setup() {
   }
 
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false); 
   WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
   unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {

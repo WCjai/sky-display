@@ -1,14 +1,106 @@
+// fetch.cpp — optimized, faithful to your old behavior
+
 #include "fetch.h"
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <time.h>
+#include <math.h>
+
 #include "display.h"
 #include "config.h"
 #include "cache.h"
 
+// externs from your project
 extern DisplayMode getDisplayMode();
 extern Epd epd;
+extern SemaphoreHandle_t gCacheMutex;
+//extern const FontDef Font16;  // used for width budgeting
+
+// ---------------- Tunables ----------------
+#define STATES_TIMEOUT_MS   20000
+#define API_TIMEOUT_MS      15000
+#define ADSB_TIMEOUT_MS     12000
+
+
 
 // ---------------- Helpers ----------------
+
+#include <map>
+
+// ---------- lightweight caches ----------
+struct RouteCacheEntry { String label; uint32_t expiryMs; };
+static std::map<String, RouteCacheEntry> gRouteCache;   // key = callsign (normalized)
+
+struct CallsignCacheEntry { String callsign; uint32_t expiryMs; };
+static std::map<String, CallsignCacheEntry> gHexToCallsign; // key = icao24 (upper)
+
+// route cache helpers
+static void cacheRoute(const String& cs, const String& label, uint32_t ttlMsHit=10*60*1000UL, uint32_t ttlMsMiss=60*1000UL) {
+  uint32_t now = millis();
+  gRouteCache[cs] = { label, now + (label.length() ? ttlMsHit : ttlMsMiss) };
+}
+static String getCachedRoute(const String& cs) {
+  auto it = gRouteCache.find(cs);
+  if (it == gRouteCache.end()) return "";
+  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gRouteCache.erase(it); return ""; }
+  return it->second.label;
+}
+
+// callsign cache helpers
+static void cacheCallsign(const String& hex, const String& cs, uint32_t ttlMsHit=2*60*1000UL, uint32_t ttlMsMiss=30*1000UL) {
+  uint32_t now = millis();
+  gHexToCallsign[hex] = { cs, now + (cs.length() ? ttlMsHit : ttlMsMiss) };
+}
+static String getCachedCallsign(const String& hex) {
+  auto it = gHexToCallsign.find(hex);
+  if (it == gHexToCallsign.end()) return "";
+  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gHexToCallsign.erase(it); return ""; }
+  return it->second.callsign;
+}
+
+// ---------- simple token buckets (keep you < ~8 rps) ----------
+static uint32_t routeTokens = 8, routeLastRefill = 0;   // adsbdb
+static uint32_t adsbTokens  = 8, adsbLastRefill  = 0;   // api.adsb.one
+
+static bool allowRouteCall() {
+  uint32_t now = millis();
+  if (now - routeLastRefill >= 1000) {
+    uint32_t add = (now - routeLastRefill) / 1000 * 8;
+    routeTokens = min<uint32_t>(routeTokens + add, 16); // burst 16
+    routeLastRefill = now;
+  }
+  if (!routeTokens) return false;
+  routeTokens--;
+  return true;
+}
+static bool allowADSBCall() {
+  uint32_t now = millis();
+  if (now - adsbLastRefill >= 1000) {
+    uint32_t add = (now - adsbLastRefill) / 1000 * 8;
+    adsbTokens = min<uint32_t>(adsbTokens + add, 16);
+    adsbLastRefill = now;
+  }
+  if (!adsbTokens) return false;
+  adsbTokens--;
+  return true;
+}
+
+// ---------- small helper: use what we’ve already displayed for this ICAO ----------
+static String lookupCachedDisplayLabelByIcao(const String& icao24) {
+  if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    for (int i = 0; i < MAX_CACHE_SIZE; ++i) {
+      if (aircraftCache[i].icao24 == icao24 && aircraftCache[i].callsign.length()) {
+        String v = aircraftCache[i].callsign;
+        if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+        return v;
+      }
+    }
+    if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+  }
+  return "";
+}
+
+
 BoundingBox getBoundingBox(float centerLat, float centerLon, int zoom) {
   float latSpan, lonSpan;
   switch (zoom) {
@@ -27,10 +119,11 @@ BoundingBox getBoundingBox(float centerLat, float centerLon, int zoom) {
   return { centerLat - latSpan, centerLat + latSpan, centerLon - lonSpan, centerLon + lonSpan };
 }
 
+
 float haversineDistance(float lat1, float lon1, float lat2, float lon2) {
-  const float R = 6371.0f;
+  const float R = 6371.0f;                         // km
   const float dLat = radians(lat2 - lat1);
-  const float dLon = radians(lon2 - lon1);
+  const float dLon = radians(lon2 - lon1);         // <-- ensure lon2 - lon1
   const float a = sinf(dLat * 0.5f) * sinf(dLat * 0.5f) +
                   cosf(radians(lat1)) * cosf(radians(lat2)) *
                   sinf(dLon * 0.5f) * sinf(dLon * 0.5f);
@@ -48,14 +141,82 @@ float calculateBearing(float lat1, float lon1, float lat2, float lon2) {
   return brng;
 }
 
+static inline bool isMeaningfulModel(const String& sIn) {
+  String s = sIn; s.trim();
+  if (!s.length()) return false;
+  if (s.equalsIgnoreCase("unknown")) return false;
+  if (s.equalsIgnoreCase("null"))    return false;
+  return true;
+}
+
+static String normalizeManufacturer(const String& in) {
+  String s = in; 
+  s.trim();
+  if (!s.length()) return s;
+
+  String lower = s; lower.toLowerCase();
+  if (lower.indexOf("avions de transport regional") != -1 ||
+      lower.indexOf("avions de transport régional") != -1) {
+    return "ATR";
+  }
+  return s;
+}
+
+static void collapseSpaces(String& s) {
+  String out; out.reserve(s.length());
+  bool ws = false;
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (c == ' ') { if (!ws) { out += ' '; ws = true; } }
+    else { out += c; ws = false; }
+  }
+  s = out;
+}
+
+static String join3(const String& a, const String& b, const String& c) {
+  String out;
+  if (a.length()) out += a;
+  if (b.length()) { if (out.length()) out += " "; out += b; }
+  if (c.length()) { if (out.length()) out += " "; out += c; }
+  if (out.length()) collapseSpaces(out);
+  return out;
+}
+
+static String ellipsize(const String& s, int maxChars) {
+  if ((int)s.length() <= maxChars) return s;
+  if (maxChars <= 1) return "…";
+  int keep = maxChars - 1;
+  String cut = s.substring(0, keep);
+  int sp = cut.lastIndexOf(' ');
+  if (sp >= keep - 8 && sp >= 8) cut = cut.substring(0, sp);
+  cut += "…";
+  return cut;
+}
+
+// Turn "BLRTRZ" -> "BLR-TRZ" if it's exactly two IATA codes stuck together.
+static String dashIfConcatenatedAirports(const String& in) {
+  String s = in; s.trim();
+  if (!s.length()) return s;
+  if (s.indexOf('-') >= 0 || s.indexOf('→') >= 0) return s; // already formatted
+
+  String u = s; u.toUpperCase();
+  if (u.length() != 6) return s;
+  for (int i = 0; i < 6; ++i) {
+    char c = u[i];
+    if (c < 'A' || c > 'Z') return s;
+  }
+  return u.substring(0,3) + "-" + u.substring(3,6);
+}
+
+// ---------------- External APIs ----------------
 static String fetchFromPlaneSpotters(const String& icao24) {
   HTTPClient http;
-  http.setTimeout(15000);
+  http.setTimeout(API_TIMEOUT_MS);
   http.begin("https://api.planespotters.net/pub/photos/hex/" + icao24);
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString(); // small JSON — OK
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(4096);
     if (!deserializeJson(doc, payload)) {
       JsonArray photos = doc["photos"].as<JsonArray>();
       if (!photos.isNull() && photos.size() > 0) {
@@ -83,90 +244,26 @@ static String fetchFromPlaneSpotters(const String& icao24) {
 
 static String fetchFromOpenSkyMeta(const String& icao24, OpenSkyAuthClient& auth) {
   HTTPClient http;
-  http.setTimeout(15000);
+  http.setTimeout(API_TIMEOUT_MS);
   http.begin("https://opensky-network.org/api/metadata/aircraft/icao/" + icao24);
   http.addHeader("Authorization", "Bearer " + auth.getAccessToken());
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString();
-    DynamicJsonDocument doc(1024);
+    DynamicJsonDocument doc(2048);
     if (!deserializeJson(doc, payload)) {
       String model = doc["model"] | "";
       String oper  = doc["operator"] | "";
       model.trim(); oper.trim();
       http.end();
-      return oper.length() ? (oper + " " + model) : model;
+      String label = oper.length() ? (oper + " " + model) : model;
+      return ellipsize(label, 36);
     }
   }
   http.end();
   return "";
 }
 
-// --- Add this helper near the top of fetch.cpp ---
-static String normalizeManufacturer(const String& in) {
-  String s = in; 
-  s.trim();
-  if (!s.length()) return s;
-
-  String lower = s;
-  lower.toLowerCase();
-
-  // Map "Avions de Transport Regional" (and "Régional") to "ATR"
-  if (lower.indexOf("avions de transport regional") != -1 ||
-      lower.indexOf("avions de transport régional") != -1) {
-    return "ATR";
-  }
-
-  // (Optional place to add more mappings later)
-  // if (lower.indexOf("airbus industrie") != -1) return "Airbus";
-  // if (lower.indexOf("the boeing company") != -1) return "Boeing";
-
-  return s;
-}
-
-
-// Normalize manufacturers that are notoriously long
-
-
-// Collapse multiple spaces to single spaces
-static void collapseSpaces(String& s) {
-  String out; out.reserve(s.length());
-  bool ws = false;
-  for (size_t i = 0; i < s.length(); ++i) {
-    char c = s[i];
-    if (c == ' ') {
-      if (!ws) { out += ' '; ws = true; }
-    } else {
-      out += c; ws = false;
-    }
-  }
-  s = out;
-}
-
-// Join up to three parts with single spaces (skip empties)
-static String join3(const String& a, const String& b, const String& c) {
-  String out;
-  if (a.length()) out += a;
-  if (b.length()) { if (out.length()) out += " "; out += b; }
-  if (c.length()) { if (out.length()) out += " "; out += c; }
-  if (out.length()) collapseSpaces(out);
-  return out;
-}
-
-// Ellipsize to maxChars (try to cut at a space near the end)
-static String ellipsize(const String& s, int maxChars) {
-  if ((int)s.length() <= maxChars) return s;
-  if (maxChars <= 1) return "…";
-  int keep = maxChars - 1;
-  String cut = s.substring(0, keep);
-  int sp = cut.lastIndexOf(' ');
-  if (sp >= keep - 8 && sp >= 8) cut = cut.substring(0, sp);
-  cut += "…";
-  return cut;
-}
-
-
-// ---- Replacement for fetchFromHexDB ----
 static String fetchFromHexDB(const String& icao24) {
   HTTPClient http;
   http.setTimeout(15000);
@@ -176,7 +273,7 @@ static String fetchFromHexDB(const String& icao24) {
   int code = http.GET();
   if (code == 200) {
     String payload = http.getString();
-    DynamicJsonDocument doc(3072);
+    DynamicJsonDocument doc(4096);
     DeserializationError err = deserializeJson(doc, payload);
     if (!err) {
       if (doc.containsKey("error")) { http.end(); return ""; }
@@ -198,32 +295,35 @@ static String fetchFromHexDB(const String& icao24) {
       const int maxChars = max(8, (screenW - leftPad - rightPad) / Font16.Width);
       auto fits = [&](const String& s){ return (int)s.length() <= maxChars; };
 
-      // Priority: keep airline (owners) as long as possible, then try opflag
-      // Sequence tries: 
-      //   RO+Manuf+Type → RO+Manuf+ICAO → RO+ManufN+Type → RO+ManufN+ICAO
-      //   OPF+Manuf+Type → OPF+Manuf+ICAO → OPF+ManufN+Type → OPF+ManufN+ICAO
-      //   (still too long?) RO+ManufN → RO+ICAO → OPF+ManufN → OPF+ICAO
-      //   If still long: RO+Type → OPF+Type → ManufN+ICAO → OPF → RO → ICAO → Type
+      // ==== YOUR NEW PRIORITY ORDER ====
       struct Cand { String a,b,c; };
       Cand seq[] = {
+        // RegisteredOwners first
         { owners, manuf,  type },
         { owners, manuf,  icao },
         { owners, manufN, type },
         { owners, manufN, icao },
+        { owners, "",     icao },
 
+        // Then OperatorFlagCode combos
         { opflag, manuf,  type },
         { opflag, manuf,  icao },
         { opflag, manufN, type },
         { opflag, manufN, icao },
 
+        // Singles with normalized manufacturer
         { owners, manufN, ""   },
-        { owners, "",     icao },
         { opflag, manufN, ""   },
         { opflag, "",     icao },
 
+        // Type-only fallbacks by owner/opflag
         { owners, "",     type },
         { opflag, "",     type },
+
+        // Manufacturer + ICAO
         { manufN, "",     icao },
+
+        // Final minimal fallbacks
         { opflag, "",     ""   },
         { owners, "",     ""   },
         { "",      "",    icao },
@@ -235,10 +335,8 @@ static String fetchFromHexDB(const String& icao24) {
         if (s.length() && fits(s)) { http.end(); return s; }
       }
 
-      // Nothing fit: pick the most-informative short base that preserves airline,
-      // then ellipsize to fit
-      String base =
-        join3(opflag, manufN, icao);             // OPF + manuf(short) + ICAO
+      // Nothing fit: pick a compact base, then ellipsize to fit
+      String base = join3(opflag, manufN, icao);   // short & informative
       if (!base.length()) base = join3(opflag, "", icao);
       if (!base.length()) base = opflag;
       if (!base.length()) base = join3(owners, manufN, icao);
@@ -255,38 +353,40 @@ static String fetchFromHexDB(const String& icao24) {
 }
 
 
-
-
-// --- ADSB.one: fill callsign from HEX when OpenSky has none ---
-// === ADSB.one: fill callsign from HEX when OpenSky has none ===
 static String fetchCallsignFromADSBOne(const String& icao24) {
-  HTTPClient http;
-  http.setTimeout(12000);
-
   String hex = icao24; hex.toUpperCase();
+
+  // cache first
+  if (String hit = getCachedCallsign(hex); hit.length() || hit == "") {
+    if (hit.length() || /* negative cached */ gHexToCallsign.count(hex)) return hit;
+  }
+
+  if (!allowADSBCall()) return ""; // skip this tick if throttled
+
+  HTTPClient http;
+  http.setTimeout(ADSB_TIMEOUT_MS);
   http.begin("https://api.adsb.one/v2/hex/" + hex);
   int code = http.GET();
-  if (code != 200) { http.end(); return ""; }
+  if (code != 200) { http.end(); cacheCallsign(hex, ""); return ""; }
 
   DynamicJsonDocument doc(8192);
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) return "";
+  if (err) { cacheCallsign(hex, ""); return ""; }
 
-  // Payload shape (your sample):
-  // { "ac":[ { "flight":"UAE31T  ", "desc":"BOEING 777-300ER", "t":"B77W", ... } ], ... }
   JsonArray ac = doc["ac"].as<JsonArray>();
-  if (ac.isNull() || ac.size() == 0) return "";
+  if (ac.isNull() || ac.size() == 0) { cacheCallsign(hex, ""); return ""; }
 
   String cs = (const char*)(ac[0]["flight"] | "");
-  cs.trim();                  // remove trailing spaces in "UAE31T  "
+  cs.trim();
+  cacheCallsign(hex, cs);
   return cs;
 }
 
-// === ADSB.one: model fallback via 'desc' (else 't' ICAO type) ===
+
 static String fetchModelFromADSBOneDesc(const String& icao24) {
   HTTPClient http;
-  http.setTimeout(12000);
+  http.setTimeout(ADSB_TIMEOUT_MS);
 
   String hex = icao24; hex.toUpperCase();
   http.begin("https://api.adsb.one/v2/hex/" + hex);
@@ -301,55 +401,12 @@ static String fetchModelFromADSBOneDesc(const String& icao24) {
   JsonArray ac = doc["ac"].as<JsonArray>();
   if (ac.isNull() || ac.size() == 0) return "";
 
-  // Prefer 'desc' (full name), otherwise 't' (ICAO type code)
   String model = (const char*)(ac[0]["desc"] | "");
   if (!model.length()) model = (const char*)(ac[0]["t"] | "");
   model.trim();
   return model;
 }
 
-
-
-String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
-  String cached = lookupCachedModel(icao24);
-  if (cached.length()) return cached;
-
-  // Try HexDB -> OpenSky -> ADSB.one(desc/t) -> PlaneSpotters
-  String model = fetchFromHexDB(icao24);
-  if (model == "") model = fetchFromOpenSkyMeta(icao24, auth);
-  if (model == "") model =   fetchFromPlaneSpotters(icao24);// <-- NEW
-  if (model == "") model = fetchModelFromADSBOneDesc(icao24);
-  if (model == "") model = "Unknown";
-
-  addToCache(icao24, model);
-  return model;
-}
-
-// Turn "BLRTRZ" -> "BLR-TRZ" if it's exactly two IATA codes stuck together.
-// Leaves everything else (e.g., "KLM879", "AAA→BBB") unchanged.
-static String dashIfConcatenatedAirports(const String& in) {
-  String s = in; s.trim();
-  if (!s.length()) return s;
-
-  // if it already contains a separator, leave it
-  if (s.indexOf('-') >= 0 || s.indexOf('→') >= 0) return s;
-
-  // make an uppercase copy for checks; return original casing in output
-  String u = s; u.toUpperCase();
-
-  // must be exactly 6 A–Z letters
-  if (u.length() != 6) return s;
-  for (int i = 0; i < 6; ++i) {
-    char c = u[i];
-    if (c < 'A' || c > 'Z') return s;
-  }
-
-  // looks like two IATA codes: insert dash and uppercase the codes
-  return u.substring(0,3) + "-" + u.substring(3,6);
-}
-
-// Make "AAA→BBB" using IATA if present, else ICAO, else city/name.
-// Returns "" if not enough info.
 static String routeLabelFromFlightroute(JsonObject fr) {
   JsonObject o = fr["origin"];
   JsonObject d = fr["destination"];
@@ -360,43 +417,72 @@ static String routeLabelFromFlightroute(JsonObject fr) {
   if (!os.length()) os = (String)(o["icao_code"] | "");
   if (!ds.length()) ds = (String)(d["icao_code"] | "");
   if (os.length() && ds.length()) return os + "-" + ds;
-
-
   return "";
 }
 
-// Query ADSBdb by callsign; return "SRC→DEST" or "" if unknown.
 static String fetchRouteLabelForCallsign(String callsign) {
   callsign.trim();
-  callsign.replace(" ", "");  // ADS-B callsigns sometimes include spaces
+  callsign.replace(" ", "");
   if (!callsign.length()) return "";
 
+  // route cache first
+  if (String hit = getCachedRoute(callsign); hit.length() || /* negative cached */ gRouteCache.count(callsign))
+    return hit;
+
+  if (!allowRouteCall()) return ""; // skip for now
+
   HTTPClient http;
-  http.setTimeout(12000);
+  http.setTimeout(API_TIMEOUT_MS);
   http.begin("https://api.adsbdb.com/v0/callsign/" + callsign);
   int code = http.GET();
-  if (code != 200) { http.end(); return ""; }
+  if (code != 200) { http.end(); cacheRoute(callsign, ""); return ""; }
 
-  // Response: { "response": { "flightroute": { origin:{...}, destination:{...}, ... } } }
   DynamicJsonDocument doc(4096);
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) return "";
+  if (err) { cacheRoute(callsign, ""); return ""; }
 
   JsonObject fr = doc["response"]["flightroute"];
-  if (fr.isNull()) return "";
-  return routeLabelFromFlightroute(fr);
+  String label = fr.isNull() ? "" : routeLabelFromFlightroute(fr);
+  cacheRoute(callsign, label);
+  return label;
 }
 
-// Decide what to show: route if available, else callsign, else ICAO24.
-static String bestFlightLabel(const String& icao24, const String& callsign) {
-  String route = fetchRouteLabelForCallsign(callsign);
-  if (route.length()) return route;              // e.g., "BLR→TRZ" or "CityA-CityB"
 
-  String cs = callsign; cs.trim();
-  if (cs.length()) return dashIfConcatenatedAirports(cs);  // <- HERE
+static String bestFlightLabel(const String& icao24, const String& callsignIn) {
+  // 0) if we already computed a display label for this ICAO, use it
+  if (String v = lookupCachedDisplayLabelByIcao(icao24); v.length()) return v;
 
-  return icao24;
+  // 1) normalize callsign
+  String cs = callsignIn; cs.trim(); cs.replace(" ", "");
+  if (!cs.length()) return icao24;   // no raw callsign → don’t try network
+
+  // 2) route cache → network (once) → fallback to raw callsign (maybe "BLRTRZ" → "BLR-TRZ")
+  if (String hit = getCachedRoute(cs); hit.length()) return hit;
+
+  if (String route = fetchRouteLabelForCallsign(cs); route.length()) return route;
+
+  return dashIfConcatenatedAirports(cs);
+}
+
+// ---------------- Public: aircraft model (old order, no caching "Unknown") ----------------
+String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
+  String cached = lookupCachedModel(icao24);
+  if (isMeaningfulModel(cached)) return cached;
+
+  // Try HexDB -> OpenSky -> PlaneSpotters -> ADSB.one(desc/t)
+  String model = fetchFromHexDB(icao24);
+  if (!isMeaningfulModel(model)) model = fetchFromOpenSkyMeta(icao24, auth);
+  if (!isMeaningfulModel(model)) model = fetchFromPlaneSpotters(icao24);
+  if (!isMeaningfulModel(model)) model = fetchModelFromADSBOneDesc(icao24);
+
+  if (!isMeaningfulModel(model)) {
+    // DON'T cache "Unknown" so later cycles can still enrich
+    return "Unknown";
+  }
+
+  addToCache(icao24, model);
+  return model;
 }
 
 // ---------------- Main fetch ----------------
@@ -420,11 +506,13 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
                "&lomax=" + String(box.east, 5);
 
   HTTPClient http;
-  http.setTimeout(20000);
-  http.useHTTP10(true);
+  http.setTimeout(STATES_TIMEOUT_MS);
+  http.useHTTP10(true);                        // robust path (avoids chunked issues)
   http.begin(url);
   http.addHeader("Authorization", "Bearer " + auth.getAccessToken());
   http.addHeader("Connection", "close");
+  http.addHeader("Accept", "application/json");
+  http.addHeader("Accept-Encoding", "identity");
 
   int httpCode = http.GET();
   if (httpCode != 200) {
@@ -434,7 +522,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     return;
   }
 
-  // Parse JSON
+  // Parse JSON (full parse, reliable)
   DynamicJsonDocument doc(64 * 1024);
   DeserializationError jerr = deserializeJson(doc, http.getStream());
   if (jerr) {
@@ -449,15 +537,9 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   int totalAircraft = states.isNull() ? 0 : states.size();
   Serial.printf("[fetch] parsed states: %d\n", totalAircraft);
   if (totalAircraft > MAX_AIRCRAFT_LIMIT) {
-    // Draw persistent error screen
     drawTooManyAircraftScreen(totalAircraft);
-
-    // Clean up HTTP and mark not busy
     http.end();
     isBusy = false;
-
-    // HARD STOP: suspend this FreeRTOS task (self-suspend)
-    // No more fetching until reboot or manual resume.
     vTaskSuspend(nullptr);
     return;
   }
@@ -482,6 +564,9 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
         float  lat      = st[6] | 0.0f;
         if (icao24 == "" || lat == 0.0f || lon == 0.0f) continue;
 
+        // guard against invalid coords
+        if (fabs(lat) > 90.0f || fabs(lon) > 180.0f) continue;
+
         float dist = haversineDistance(centerLat, centerLon, lat, lon);
         float brng = calculateBearing(centerLat, centerLon, lat, lon);
 
@@ -498,7 +583,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   }
   if (locked1) xSemaphoreGive(gCacheMutex);
 
-  // ---- Phase 2: add new rows (no long-held mutex) ----
+  // ---- Phase 2: add/update rows (no long-held mutex) ----
   if (!states.isNull()) {
     for (JsonArray st : states) {
       String icao24   = st[0] | "";
@@ -507,19 +592,30 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       float  lon      = st[5] | 0.0f;
       float  lat      = st[6] | 0.0f;
       if (icao24 == "" || lat == 0.0f || lon == 0.0f) continue;
+      if (fabs(lat) > 90.0f || fabs(lon) > 180.0f) continue;
 
-      // Fill callsign first if OpenSky didn't provide it
+      // Fill callsign if OpenSky didn't provide it
       callsign.trim();
       if (!callsign.length()) {
-        callsign = fetchCallsignFromADSBOne(icao24);  // <-- NEW
+        String hexU = icao24; hexU.toUpperCase();
+        callsign = getCachedCallsign(hexU);
+        if (!callsign.length()) callsign = fetchCallsignFromADSBOne(hexU);
       }
 
-      // (rest unchanged)
+
       float dist = haversineDistance(centerLat, centerLon, lat, lon);
       float brng = calculateBearing(centerLat, centerLon, lat, lon);
 
-      String model       = fetchAircraftModel(icao24, auth);
-      String flightLabel = bestFlightLabel(icao24, callsign);  // will query ADSBdb with filled callsign
+      // Get model (do NOT cache Unknown)
+      String model = fetchAircraftModel(icao24, auth);
+
+      // If model came back Unknown, keep any previous good value
+      if (!isMeaningfulModel(model)) {
+        String prev = lookupCachedModel(icao24);
+        if (isMeaningfulModel(prev)) model = prev;
+      }
+
+      String flightLabel = bestFlightLabel(icao24, callsign);
 
       addToCache(icao24, model, flightLabel, country, dist, brng);
 
@@ -548,9 +644,9 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
 
   // ---- Draw only in LIVE ----
   if (getDisplayMode() == LIVE_MODE) {
-    ensurePartialPrimed();                 // stay in fast/partial
+    ensurePartialPrimed();
     if (totalAircraft == 0) {
-      drawNoAircraftScreen(timestamp);     // partial write + TurnOnDisplay_Partial()
+      drawNoAircraftScreen((time_t)timestamp);
       lastHadAircraft = false;
     } else {
       drawAircraftInfoToDisplay_Partial(timeStr, totalAircraft);
@@ -558,9 +654,46 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     }
   }
 
-  // else (HOLD_MODE): DO NOT touch EPD here. We only updated the cache above.
-
   http.end();
   isBusy = false;
 }
 
+
+
+// RegisteredOwners + Manufacturer + Type
+
+// RegisteredOwners + Manufacturer + ICAOTypeCode
+
+// RegisteredOwners + normalized(Manufacturer) + Type
+
+// RegisteredOwners + normalized(Manufacturer) + ICAOTypeCode
+
+// RegisteredOwners + ICAOTypeCode
+
+// OperatorFlagCode + Manufacturer + Type
+
+// OperatorFlagCode + Manufacturer + ICAOTypeCode
+
+// OperatorFlagCode + normalized(Manufacturer) + Type
+
+// OperatorFlagCode + normalized(Manufacturer) + ICAOTypeCode
+
+// RegisteredOwners + normalized(Manufacturer)
+
+// OperatorFlagCode + normalized(Manufacturer)
+
+// OperatorFlagCode + ICAOTypeCode
+
+// RegisteredOwners + Type
+
+// OperatorFlagCode + Type
+
+// normalized(Manufacturer) + ICAOTypeCode
+
+// OperatorFlagCode
+
+// RegisteredOwners
+
+// ICAOTypeCode
+
+// Type

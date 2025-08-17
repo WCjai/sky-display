@@ -17,7 +17,7 @@ bool OpenSkyAuthClient::fetchNewToken() {
     int httpCode = http.POST(body);
     if (httpCode == 200) {
         String payload = http.getString();
-        DynamicJsonDocument doc(2048);
+        JsonDocument doc;
         DeserializationError err = deserializeJson(doc, payload);
         if (err) {
             Serial.println("❌ Token JSON parse error");
