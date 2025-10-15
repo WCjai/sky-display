@@ -1,72 +1,101 @@
-// fetch.cpp — optimized, faithful to your old behavior
-
 #include "fetch.h"
+
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <time.h>
+#include <map>
 #include <math.h>
 
 #include "display.h"
 #include "config.h"
 #include "cache.h"
 
-// externs from your project
-extern DisplayMode getDisplayMode();
-extern Epd epd;
-extern SemaphoreHandle_t gCacheMutex;
-//extern const FontDef Font16;  // used for width budgeting
+// ===== DEBUG SWITCHES (set to 1 to enable) =====
+#define DEBUG_FETCH   1   // high-level flow (OpenSky pull, per-aircraft summary)
+#define DEBUG_MODEL   1   // model provider hits/misses (HexDB/OpenSky/PlaneSpotters/ADSB.one)
+#define DEBUG_ROUTE   1   // callsign + route (ADSB.one callsign & ADSBdb route)
+#define DEBUG_CACHE   1   // cache pruning sizes
+#define DEBUG_HTTP    1   // per-request URL + HTTP code
+#define DEBUG_HEAP    0   // heap watermark prints (ESP-IDF/Arduino)
+
+// ===== helpers =====
+#if DEBUG_HEAP
+  #include "esp_heap_caps.h"
+  static void dbg_heap(const char* tag){
+    Serial.printf("[HEAP] %s | free=%u  min=%u\n", tag,
+      heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+      heap_caps_get_minimum_free_size(MALLOC_CAP_DEFAULT));
+  }
+#else
+  static inline void dbg_heap(const char*) {}
+#endif
+
+#if DEBUG_FETCH || DEBUG_MODEL || DEBUG_ROUTE || DEBUG_CACHE || DEBUG_HTTP
+  #define DBG_PRINTF(...)   do{ Serial.printf(__VA_ARGS__); }while(0)
+#else
+  #define DBG_PRINTF(...)   do{}while(0)
+#endif
+
+#if DEBUG_HTTP
+  #define DBG_HTTP(...)     DBG_PRINTF(__VA_ARGS__)
+#else
+  #define DBG_HTTP(...)     do{}while(0)
+#endif
+
+#if DEBUG_MODEL
+  #define DBG_MODEL(...)    DBG_PRINTF(__VA_ARGS__)
+#else
+  #define DBG_MODEL(...)    do{}while(0)
+#endif
+
+#if DEBUG_ROUTE
+  #define DBG_ROUTE(...)    DBG_PRINTF(__VA_ARGS__)
+#else
+  #define DBG_ROUTE(...)    do{}while(0)
+#endif
+
+#if DEBUG_FETCH
+  #define DBG_FETCH(...)    DBG_PRINTF(__VA_ARGS__)
+#else
+  #define DBG_FETCH(...)    do{}while(0)
+#endif
+
+#if DEBUG_CACHE
+  #define DBG_CACHE(...)    DBG_PRINTF(__VA_ARGS__)
+#else
+  #define DBG_CACHE(...)    do{}while(0)
+#endif
 
 // ---------------- Tunables ----------------
 #define STATES_TIMEOUT_MS   20000
 #define API_TIMEOUT_MS      15000
 #define ADSB_TIMEOUT_MS     12000
 
+// Route/callsign cache hard caps
+static const size_t ROUTE_MAX_ENTRIES    = 512;
+static const size_t CALLSIGN_MAX_ENTRIES = 512;
 
+// Pruning cadence
+static uint32_t gLastPruneMs = 0;
 
-// ---------------- Helpers ----------------
+// Backoff for model fetchers when providers are failing
+static uint32_t gModelFailUntilMs = 0;
 
-#include <map>
-
-// ---------- lightweight caches ----------
+// ---------------- lightweight caches ----------------
 struct RouteCacheEntry { String label; uint32_t expiryMs; };
 static std::map<String, RouteCacheEntry> gRouteCache;   // key = callsign (normalized)
 
 struct CallsignCacheEntry { String callsign; uint32_t expiryMs; };
-static std::map<String, CallsignCacheEntry> gHexToCallsign; // key = icao24 (upper)
+static std::map<String, CallsignCacheEntry> gHexToCallsign; // key = icao24 (UPPER)
 
-// route cache helpers
-static void cacheRoute(const String& cs, const String& label, uint32_t ttlMsHit=10*60*1000UL, uint32_t ttlMsMiss=60*1000UL) {
-  uint32_t now = millis();
-  gRouteCache[cs] = { label, now + (label.length() ? ttlMsHit : ttlMsMiss) };
-}
-static String getCachedRoute(const String& cs) {
-  auto it = gRouteCache.find(cs);
-  if (it == gRouteCache.end()) return "";
-  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gRouteCache.erase(it); return ""; }
-  return it->second.label;
-}
-
-// callsign cache helpers
-static void cacheCallsign(const String& hex, const String& cs, uint32_t ttlMsHit=2*60*1000UL, uint32_t ttlMsMiss=30*1000UL) {
-  uint32_t now = millis();
-  gHexToCallsign[hex] = { cs, now + (cs.length() ? ttlMsHit : ttlMsMiss) };
-}
-static String getCachedCallsign(const String& hex) {
-  auto it = gHexToCallsign.find(hex);
-  if (it == gHexToCallsign.end()) return "";
-  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gHexToCallsign.erase(it); return ""; }
-  return it->second.callsign;
-}
-
-// ---------- simple token buckets (keep you < ~8 rps) ----------
+// ---------- token buckets (keep you < ~8 rps each provider) ----------
 static uint32_t routeTokens = 8, routeLastRefill = 0;   // adsbdb
 static uint32_t adsbTokens  = 8, adsbLastRefill  = 0;   // api.adsb.one
 
 static bool allowRouteCall() {
   uint32_t now = millis();
   if (now - routeLastRefill >= 1000) {
-    uint32_t add = (now - routeLastRefill) / 1000 * 8;
-    routeTokens = min<uint32_t>(routeTokens + add, 16); // burst 16
+    uint32_t add = ((now - routeLastRefill) / 1000) * 8;
+    routeTokens = min<uint32_t>(routeTokens + add, 16); // allow small bursts
     routeLastRefill = now;
   }
   if (!routeTokens) return false;
@@ -76,7 +105,7 @@ static bool allowRouteCall() {
 static bool allowADSBCall() {
   uint32_t now = millis();
   if (now - adsbLastRefill >= 1000) {
-    uint32_t add = (now - adsbLastRefill) / 1000 * 8;
+    uint32_t add = ((now - adsbLastRefill) / 1000) * 8;
     adsbTokens = min<uint32_t>(adsbTokens + add, 16);
     adsbLastRefill = now;
   }
@@ -85,7 +114,58 @@ static bool allowADSBCall() {
   return true;
 }
 
-// ---------- small helper: use what we’ve already displayed for this ICAO ----------
+// ---------- helpers ----------
+static inline bool isMeaningfulModel(const String& sIn) {
+  String s = sIn; s.trim();
+  if (!s.length()) return false;
+  if (s.equalsIgnoreCase("unknown")) return false;
+  if (s.equalsIgnoreCase("null"))    return false;
+  return true;
+}
+
+static void collapseSpaces(String& s) {
+  String out; out.reserve(s.length());
+  bool ws = false;
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (c == ' ') { if (!ws) { out += ' '; ws = true; } }
+    else { out += c; ws = false; }
+  }
+  s = out;
+}
+static String join3(const String& a, const String& b, const String& c) {
+  String out;
+  out.reserve(a.length() + b.length() + c.length() + 2);
+  if (a.length()) out += a;
+  if (b.length()) { if (out.length()) out += " "; out += b; }
+  if (c.length()) { if (out.length()) out += " "; out += c; }
+  if (out.length()) collapseSpaces(out);
+  return out;
+}
+static String ellipsize(const String& s, int maxChars) {
+  if ((int)s.length() <= maxChars) return s;
+  if (maxChars <= 1) return "…";
+  int keep = maxChars - 1;
+  String cut = s.substring(0, keep);
+  int sp = cut.lastIndexOf(' ');
+  if (sp >= keep - 8 && sp >= 8) cut = cut.substring(0, sp);
+  cut += "…";
+  return cut;
+}
+
+static String normalizeManufacturer(const String& in) {
+  String s = in; 
+  s.trim();
+  if (!s.length()) return s;
+  String lower = s; lower.toLowerCase();
+  if (lower.indexOf("avions de transport regional") != -1 ||
+      lower.indexOf("avions de transport régional") != -1) {
+    return "ATR";
+  }
+  return s;
+}
+
+// Lookup the last label we rendered for this ICAO (from aircraftCache)
 static String lookupCachedDisplayLabelByIcao(const String& icao24) {
   if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
     for (int i = 0; i < MAX_CACHE_SIZE; ++i) {
@@ -100,10 +180,61 @@ static String lookupCachedDisplayLabelByIcao(const String& icao24) {
   return "";
 }
 
+// route cache helpers
+static void cacheRoute(const String& cs, const String& label, uint32_t ttlMsHit=10*60*1000UL, uint32_t ttlMsMiss=60*1000UL) {
+  uint32_t now = millis();
+  gRouteCache[cs] = { label, now + (label.length() ? ttlMsHit : ttlMsMiss) };
+}
+static String getCachedRoute(const String& cs) {
+  auto it = gRouteCache.find(cs);
+  if (it == gRouteCache.end()) return "";
+  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gRouteCache.erase(it); return ""; }
+  return it->second.label;
+}
 static bool routeCacheHas(const String& cs) {
   return gRouteCache.find(cs) != gRouteCache.end();
 }
 
+// callsign cache helpers
+static void cacheCallsign(const String& hex, const String& cs, uint32_t ttlMsHit=2*60*1000UL, uint32_t ttlMsMiss=30*1000UL) {
+  uint32_t now = millis();
+  gHexToCallsign[hex] = { cs, now + (cs.length() ? ttlMsHit : ttlMsMiss) };
+}
+static String getCachedCallsign(const String& hex) {
+  auto it = gHexToCallsign.find(hex);
+  if (it == gHexToCallsign.end()) return "";
+  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gHexToCallsign.erase(it); return ""; }
+  return it->second.callsign;
+}
+
+// map pruning
+static void pruneSmallMaps() {
+  const uint32_t now = millis();
+  if ((uint32_t)(now - gLastPruneMs) < 30000UL) return; // every 30s
+  gLastPruneMs = now;
+
+  size_t beforeR = gRouteCache.size(), beforeC = gHexToCallsign.size();
+
+  // remove expired entries
+  for (auto it = gRouteCache.begin(); it != gRouteCache.end(); ) {
+    if ((int32_t)(it->second.expiryMs - now) <= 0) it = gRouteCache.erase(it);
+    else ++it;
+  }
+  for (auto it = gHexToCallsign.begin(); it != gHexToCallsign.end(); ) {
+    if ((int32_t)(it->second.expiryMs - now) <= 0) it = gHexToCallsign.erase(it);
+    else ++it;
+  }
+
+  // hard caps
+  while (gRouteCache.size()    > ROUTE_MAX_ENTRIES   && !gRouteCache.empty())    gRouteCache.erase(gRouteCache.begin());
+  while (gHexToCallsign.size() > CALLSIGN_MAX_ENTRIES&& !gHexToCallsign.empty()) gHexToCallsign.erase(gHexToCallsign.begin());
+
+  DBG_CACHE("[RCACHE] size=%u  [CCACHE] size=%u (before %u/%u)\n",
+    (unsigned)gRouteCache.size(), (unsigned)gHexToCallsign.size(),
+    (unsigned)beforeR, (unsigned)beforeC);
+}
+
+// ---------------- Geometry helpers ----------------
 BoundingBox getBoundingBox(float centerLat, float centerLon, int zoom) {
   float latSpan, lonSpan;
   switch (zoom) {
@@ -122,19 +253,17 @@ BoundingBox getBoundingBox(float centerLat, float centerLon, int zoom) {
   return { centerLat - latSpan, centerLat + latSpan, centerLon - lonSpan, centerLon + lonSpan };
 }
 
-
-float haversineDistance(float lat1, float lon1, float lat2, float lon2) {
-  const float R = 6371.0f;                         // km
+static float haversineDistance(float lat1, float lon1, float lat2, float lon2) {
+  const float R = 6371.0f;
   const float dLat = radians(lat2 - lat1);
-  const float dLon = radians(lon2 - lon1);         // <-- ensure lon2 - lon1
+  const float dLon = radians(lon2 - lon1);
   const float a = sinf(dLat * 0.5f) * sinf(dLat * 0.5f) +
                   cosf(radians(lat1)) * cosf(radians(lat2)) *
                   sinf(dLon * 0.5f) * sinf(dLon * 0.5f);
   const float c = 2.0f * atanf(sqrtf(a) / sqrtf(1.0f - a));
   return R * c;
 }
-
-float calculateBearing(float lat1, float lon1, float lat2, float lon2) {
+static float calculateBearing(float lat1, float lon1, float lat2, float lon2) {
   const float dLon = radians(lon2 - lon1);
   const float y = sinf(dLon) * cosf(radians(lat2));
   const float x = cosf(radians(lat1)) * sinf(radians(lat2)) -
@@ -144,68 +273,18 @@ float calculateBearing(float lat1, float lon1, float lat2, float lon2) {
   return brng;
 }
 
-static inline bool isMeaningfulModel(const String& sIn) {
-  String s = sIn; s.trim();
-  if (!s.length()) return false;
-  if (s.equalsIgnoreCase("unknown")) return false;
-  if (s.equalsIgnoreCase("null"))    return false;
-  return true;
-}
-
-static String normalizeManufacturer(const String& in) {
-  String s = in; 
-  s.trim();
-  if (!s.length()) return s;
-
-  String lower = s; lower.toLowerCase();
-  if (lower.indexOf("avions de transport regional") != -1 ||
-      lower.indexOf("avions de transport régional") != -1) {
-    return "ATR";
-  }
-  return s;
-}
-
-static void collapseSpaces(String& s) {
-  String out; out.reserve(s.length());
-  bool ws = false;
-  for (size_t i = 0; i < s.length(); ++i) {
-    char c = s[i];
-    if (c == ' ') { if (!ws) { out += ' '; ws = true; } }
-    else { out += c; ws = false; }
-  }
-  s = out;
-}
-
-static String join3(const String& a, const String& b, const String& c) {
-  String out;
-  if (a.length()) out += a;
-  if (b.length()) { if (out.length()) out += " "; out += b; }
-  if (c.length()) { if (out.length()) out += " "; out += c; }
-  if (out.length()) collapseSpaces(out);
-  return out;
-}
-
-static String ellipsize(const String& s, int maxChars) {
-  if ((int)s.length() <= maxChars) return s;
-  if (maxChars <= 1) return "…";
-  int keep = maxChars - 1;
-  String cut = s.substring(0, keep);
-  int sp = cut.lastIndexOf(' ');
-  if (sp >= keep - 8 && sp >= 8) cut = cut.substring(0, sp);
-  cut += "…";
-  return cut;
-}
-
-
 // ---------------- External APIs ----------------
 static String fetchFromPlaneSpotters(const String& icao24) {
   HTTPClient http;
   http.setTimeout(API_TIMEOUT_MS);
-  http.begin("https://api.planespotters.net/pub/photos/hex/" + icao24);
+  String url = "https://api.planespotters.net/pub/photos/hex/" + icao24;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
   int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (PlaneSpotters)\n", code);
   if (code == 200) {
-    String payload = http.getString(); // small JSON — OK
-    JsonDocument doc;
+    String payload = http.getString();
+    StaticJsonDocument<8192> doc; // safe headroom
     if (!deserializeJson(doc, payload)) {
       JsonArray photos = doc["photos"].as<JsonArray>();
       if (!photos.isNull() && photos.size() > 0) {
@@ -220,11 +299,14 @@ static String fetchFromPlaneSpotters(const String& icao24) {
           if (s != -1) {
             String model = slug.substring(s + 1);
             model.trim(); model.toUpperCase();
+            DBG_MODEL("[MODEL] PlaneSpotters '%s'\n", model.c_str());
             http.end();
             return model;
           }
         }
       }
+    } else {
+      DBG_MODEL("[MODEL] PlaneSpotters JSON error\n");
     }
   }
   http.end();
@@ -234,19 +316,26 @@ static String fetchFromPlaneSpotters(const String& icao24) {
 static String fetchFromOpenSkyMeta(const String& icao24, OpenSkyAuthClient& auth) {
   HTTPClient http;
   http.setTimeout(API_TIMEOUT_MS);
-  http.begin("https://opensky-network.org/api/metadata/aircraft/icao/" + icao24);
+  String url = "https://opensky-network.org/api/metadata/aircraft/icao/" + icao24;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
   http.addHeader("Authorization", "Bearer " + auth.getAccessToken());
   int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (OpenSky meta)\n", code);
   if (code == 200) {
     String payload = http.getString();
-    JsonDocument doc;
+    StaticJsonDocument<4096> doc;
     if (!deserializeJson(doc, payload)) {
       String model = doc["model"] | "";
       String oper  = doc["operator"] | "";
       model.trim(); oper.trim();
-      http.end();
       String label = oper.length() ? (oper + " " + model) : model;
-      return ellipsize(label, 36);
+      label = ellipsize(label, 36);
+      DBG_MODEL("[MODEL] OpenSky '%s'\n", label.c_str());
+      http.end();
+      return label;
+    } else {
+      DBG_MODEL("[MODEL] OpenSky meta JSON error\n");
     }
   }
   http.end();
@@ -257,20 +346,19 @@ static String fetchFromHexDB(const String& icao24) {
   HTTPClient http;
   http.setTimeout(15000);
 
-  String hex = icao24; hex.toLowerCase();                // HexDB expects lowercase
-  http.begin("https://hexdb.io/api/v1/aircraft/" + hex);
+  String hex = icao24; hex.toLowerCase(); // HexDB expects lowercase
+  String url = "https://hexdb.io/api/v1/aircraft/" + hex;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
   int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (HexDB)\n", code);
   if (code == 200) {
-    String payload = http.getString();
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, payload);
+    StaticJsonDocument<6144> doc;
+    DeserializationError err = deserializeJson(doc, http.getStream());
+    http.end();
     if (!err) {
-      if (!doc["error"].isNull()) {  // or simply: if (doc["error"])
-        http.end();
-        return "";
-      }
+      if (!doc["error"].isNull()) { DBG_MODEL("[MODEL] HexDB error field present\n"); return ""; }
 
-      // Pull fields
       String owners  = doc["RegisteredOwners"] | "";
       String opflag  = doc["OperatorFlagCode"] | "";
       String manuf   = doc["Manufacturer"]     | "";
@@ -279,120 +367,116 @@ static String fetchFromHexDB(const String& icao24) {
 
       owners.trim(); opflag.trim(); manuf.trim(); type.trim(); icao.trim();
 
-      // Sanitize manufacturer
       String manufN = normalizeManufacturer(manuf);
 
-      // Width budget for model line (Font16 at x=5 on 400px panel)
-      const int screenW = 400, leftPad = 5, rightPad = 5;
-      const int maxChars = max(8, (screenW - leftPad - rightPad) / Font16.Width);
-      auto fits = [&](const String& s){ return (int)s.length() <= maxChars; };
-
-      // ==== YOUR NEW PRIORITY ORDER ====
+      // Candidate order
       struct Cand { String a,b,c; };
       Cand seq[] = {
-        // RegisteredOwners first
         { owners, manuf,  type },
         { owners, manuf,  icao },
         { owners, manufN, type },
         { owners, manufN, icao },
         { owners, "",     icao },
 
-        // Then OperatorFlagCode combos
         { opflag, manuf,  type },
         { opflag, manuf,  icao },
         { opflag, manufN, type },
         { opflag, manufN, icao },
 
-        // Singles with normalized manufacturer
         { owners, manufN, ""   },
         { opflag, manufN, ""   },
         { opflag, "",     icao },
 
-        // Type-only fallbacks by owner/opflag
         { owners, "",     type },
         { opflag, "",     type },
 
-        // Manufacturer + ICAO
         { manufN, "",     icao },
 
-        // Final minimal fallbacks
         { opflag, "",     ""   },
         { owners, "",     ""   },
         { "",      "",    icao },
         { "",      "",    type }
       };
 
+      auto fits = [&](const String& s){ return (int)s.length() <= 36; };
+
       for (const auto& c : seq) {
         String s = join3(c.a, c.b, c.c);
-        if (s.length() && fits(s)) { http.end(); return s; }
+        if (s.length() && fits(s)) { DBG_MODEL("[MODEL] HexDB chose '%s'\n", s.c_str()); return s; }
       }
 
-      // Nothing fit: pick a compact base, then ellipsize to fit
-      String base = join3(opflag, manufN, icao);   // short & informative
+      String base = join3(opflag, manufN, icao);
       if (!base.length()) base = join3(opflag, "", icao);
       if (!base.length()) base = opflag;
       if (!base.length()) base = join3(owners, manufN, icao);
       if (!base.length()) base = icao;
       if (!base.length()) base = type;
       if (!base.length()) base = "Unknown";
-
-      http.end();
-      return ellipsize(base, maxChars);
+      base = ellipsize(base, 36);
+      DBG_MODEL("[MODEL] HexDB base '%s'\n", base.c_str());
+      return base;
+    } else {
+      DBG_MODEL("[MODEL] HexDB JSON error\n");
     }
+  } else {
+    http.end();
   }
-  http.end();
   return "";
 }
-
 
 static String fetchCallsignFromADSBOne(const String& icao24) {
   String hex = icao24; hex.toUpperCase();
 
-  // cache first
   {
     String hit = getCachedCallsign(hex);
-    // if we have a positive value OR a negative-cached miss, return it
     if (hit.length() || gHexToCallsign.count(hex)) {
+      DBG_ROUTE("[ROUTE] callsign cache %s -> '%s'\n", hex.c_str(), hit.c_str());
       return hit;
     }
   }
 
-  if (!allowADSBCall()) return ""; // skip this tick if throttled
+  if (!allowADSBCall()) return "";
 
   HTTPClient http;
   http.setTimeout(ADSB_TIMEOUT_MS);
-  http.begin("https://api.adsb.one/v2/hex/" + hex);
+  String url = "https://api.adsb.one/v2/hex/" + hex;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
   int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (ADSB.one callsign)\n", code);
   if (code != 200) { http.end(); cacheCallsign(hex, ""); return ""; }
 
-  JsonDocument doc;
+  StaticJsonDocument<8192> doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) { cacheCallsign(hex, ""); return ""; }
+  if (err) { cacheCallsign(hex, ""); DBG_ROUTE("[ROUTE] callsign JSON error\n"); return ""; }
 
   JsonArray ac = doc["ac"].as<JsonArray>();
-  if (ac.isNull() || ac.size() == 0) { cacheCallsign(hex, ""); return ""; }
+  if (ac.isNull() || ac.size() == 0) { cacheCallsign(hex, ""); DBG_ROUTE("[ROUTE] callsign empty array\n"); return ""; }
 
   String cs = (const char*)(ac[0]["flight"] | "");
   cs.trim();
   cacheCallsign(hex, cs);
+  DBG_ROUTE("[ROUTE] callsign from ADSB.one %s -> '%s'\n", hex.c_str(), cs.c_str());
   return cs;
 }
-
 
 static String fetchModelFromADSBOneDesc(const String& icao24) {
   HTTPClient http;
   http.setTimeout(ADSB_TIMEOUT_MS);
 
   String hex = icao24; hex.toUpperCase();
-  http.begin("https://api.adsb.one/v2/hex/" + hex);
+  String url = "https://api.adsb.one/v2/hex/" + hex;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
   int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (ADSB.one model)\n", code);
   if (code != 200) { http.end(); return ""; }
 
-  JsonDocument doc;
+  StaticJsonDocument<8192> doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) return "";
+  if (err) { DBG_MODEL("[MODEL] ADSB1 JSON error\n"); return ""; }
 
   JsonArray ac = doc["ac"].as<JsonArray>();
   if (ac.isNull() || ac.size() == 0) return "";
@@ -400,6 +484,7 @@ static String fetchModelFromADSBOneDesc(const String& icao24) {
   String model = (const char*)(ac[0]["desc"] | "");
   if (!model.length()) model = (const char*)(ac[0]["t"] | "");
   model.trim();
+  DBG_MODEL("[MODEL] ADSB1 '%s'\n", model.c_str());
   return model;
 }
 
@@ -421,88 +506,143 @@ static String fetchRouteLabelForCallsign(String callsign) {
   callsign.replace(" ", "");
   if (!callsign.length()) return "";
 
-  // route cache first
   {
     String hit = getCachedRoute(callsign);
-    if (hit.length() || gRouteCache.count(callsign)) {
+    if (hit.length() || routeCacheHas(callsign)) {
+      DBG_ROUTE("[ROUTE] route cache %s -> '%s'\n", callsign.c_str(), hit.c_str());
       return hit;
     }
   }
 
-  if (!allowRouteCall()) return ""; // skip for now
+  if (!allowRouteCall()) return "";
 
   HTTPClient http;
   http.setTimeout(API_TIMEOUT_MS);
-  http.begin("https://api.adsbdb.com/v0/callsign/" + callsign);
+  String url = "https://api.adsbdb.com/v0/callsign/" + callsign;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
   int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (ADSBdb)\n", code);
   if (code != 200) { http.end(); cacheRoute(callsign, ""); return ""; }
 
-  JsonDocument doc;
+  StaticJsonDocument<4096> doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) { cacheRoute(callsign, ""); return ""; }
+  if (err) { cacheRoute(callsign, ""); DBG_ROUTE("[ROUTE] ADSBdb JSON error\n"); return ""; }
 
   JsonObject fr = doc["response"]["flightroute"];
   String label = fr.isNull() ? "" : routeLabelFromFlightroute(fr);
   cacheRoute(callsign, label);
+  DBG_ROUTE("[ROUTE] ADSBdb %s -> '%s'\n", callsign.c_str(), label.c_str());
   return label;
 }
 
+static bool modelFetchAllowed() { return (int32_t)(gModelFailUntilMs - millis()) <= 0; }
 
 static String bestFlightLabel(const String& icao24, const String& callsignIn) {
-  // 0) If we already computed a display label for this ICAO, use it
-  {
-    String v = lookupCachedDisplayLabelByIcao(icao24);
-    if (v.length()) return v;
+  String v = lookupCachedDisplayLabelByIcao(icao24);
+  if (v.length()) { DBG_ROUTE("[ROUTE] reuse cached label for %s -> '%s'\n", icao24.c_str(), v.c_str()); return v; }
+
+  String cs = callsignIn; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
+  if (!cs.length()) { DBG_ROUTE("[ROUTE] no callsign for %s, using icao\n", icao24.c_str()); return icao24; }
+
+  String hit = getCachedRoute(cs);
+  if (hit.length() || routeCacheHas(cs)) {
+    DBG_ROUTE("[ROUTE] route cache %s -> '%s'\n", cs.c_str(), hit.c_str());
+    return hit;
   }
-
-  // 1) Normalize callsign
-  String cs = callsignIn;
-  cs.trim();
-  cs.replace(" ", "");
-  cs.toUpperCase();
-  if (!cs.length()) return icao24;   // no callsign → don’t try network
-
-  // 2) Route cache → (respect negative cache) → network once → fallback to raw callsign
-  {
-    String hit = getCachedRoute(cs);   // returns "" if no positive cached value
-    if (hit.length() || routeCacheHas(cs)) return hit;  // if negative-cached, also return ""
-  }
-
-  // Not cached: fetch once (fetcher should cache hit/miss with TTL)
   String route = fetchRouteLabelForCallsign(cs);
-  if (route.length()) return route;
-
-  // 3) Fallback: just show the callsign you generated
+  if (route.length()) {
+    DBG_ROUTE("[ROUTE] ADSBdb %s -> '%s'\n", cs.c_str(), route.c_str());
+    return route;
+  }
+  DBG_ROUTE("[ROUTE] fallback callsign %s\n", cs.c_str());
   return cs;
 }
 
-// ---------------- Public: aircraft model (old order, no caching "Unknown") ----------------
+// ---------------- Public: aircraft model (never degrade) ----------------
+// String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
+//   String cached = lookupCachedModel(icao24);
+//   if (isMeaningfulModel(cached)) {
+//     DBG_MODEL("[MODEL] cache hit %s -> '%s'\n", icao24.c_str(), cached.c_str());
+//     return cached;
+//   }
+
+//   if (!modelFetchAllowed()) {
+//     DBG_MODEL("[MODEL] backoff active; returning cached/Unknown for %s\n", icao24.c_str());
+//     if (isMeaningfulModel(cached)) return cached;
+//     return "Unknown";
+//   }
+
+//   String model = fetchFromHexDB(icao24);
+//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=HexDB   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+//   model = fetchFromOpenSkyMeta(icao24, auth);
+//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=OpenSky %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+//   model = fetchFromPlaneSpotters(icao24);
+//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=PSpot   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+//   model = fetchModelFromADSBOneDesc(icao24);
+//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=ADSB1   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+
+//   DBG_MODEL("[MODEL] miss all providers for %s; backing off\n", icao24.c_str());
+//   gModelFailUntilMs = millis() + 15000UL;
+//   if (isMeaningfulModel(cached)) return cached;
+//   return "Unknown";
+
+// WIN:
+//   addToCache(icao24, model, "", "", -1, -1);
+//   return model;
+// }
+
 String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
+  // 0) If we already have a good one, use it
   String cached = lookupCachedModel(icao24);
-  if (isMeaningfulModel(cached)) return cached;
-
-  // Try HexDB -> OpenSky -> PlaneSpotters -> ADSB.one(desc/t)
-  String model = fetchFromHexDB(icao24);
-  if (!isMeaningfulModel(model)) model = fetchFromOpenSkyMeta(icao24, auth);
-  if (!isMeaningfulModel(model)) model = fetchFromPlaneSpotters(icao24);
-  if (!isMeaningfulModel(model)) model = fetchModelFromADSBOneDesc(icao24);
-
-  if (!isMeaningfulModel(model)) {
-    // DON'T cache "Unknown" so later cycles can still enrich
-    return "Unknown";
+  auto isMeaningful = [](const String& s){
+    String t = s; t.trim();
+    return t.length() && !t.equalsIgnoreCase("unknown") && !t.equalsIgnoreCase("null");
+  };
+  if (isMeaningful(cached)) {
+    DBG_MODEL("[MODEL] cache hit %s -> '%s'\n", icao24.c_str(), cached.c_str());
+    return cached;
   }
 
-  addToCache(icao24, model);
+  // 1) Try providers in strict order
+  String model = fetchFromHexDB(icao24);
+  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=HexDB   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+
+  model = fetchFromOpenSkyMeta(icao24, auth);
+  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=OpenSky %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+
+  model = fetchFromPlaneSpotters(icao24);
+  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=PSpot   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+
+  model = fetchModelFromADSBOneDesc(icao24);
+  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=ADSB1   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+
+  // 2) Everything failed → declare Unknown (explicitly non-empty)
+  DBG_MODEL("[MODEL] all providers failed for %s -> 'Unknown'\n", icao24.c_str());
+  return "Unknown";
+
+WIN:
+  // Cache the real model (not Unknown)
+  addToCache(icao24, model, "", "", -1, -1);
   return model;
 }
 
 // ---------------- Main fetch ----------------
 void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom, OpenSkyAuthClient& auth) {
   static bool isBusy = false;
-  static bool lastHadAircraft = true;   // track LIVE-only clears
+  static bool lastHadAircraft = true;
   if (isBusy) return;
   isBusy = true;
+
+  // prune small maps and old cache rows periodically
+  pruneSmallMaps();
+  static uint32_t lastCachePrune = 0;
+  uint32_t now = millis();
+  if ((uint32_t)(now - lastCachePrune) > 60000UL) {
+    pruneCacheByAge(20UL * 60UL * 1000UL); // 20 minutes
+    lastCachePrune = now;
+  }
 
   if (!auth.ensureValidToken()) {
     isBusy = false;
@@ -511,15 +651,20 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   }
 
   const BoundingBox box = getBoundingBox(centerLat, centerLon, zoom);
-  String url = String("https://opensky-network.org/api/states/all?") +
-               "lamin=" + String(box.south, 5) +
-               "&lamax=" + String(box.north, 5) +
-               "&lomin=" + String(box.west, 5)  +
-               "&lomax=" + String(box.east, 5);
+  DBG_FETCH("[FETCH] bbox lat=[%.3f..%.3f] lon=[%.3f..%.3f] zoom=%d\n",
+            box.south, box.north, box.west, box.east, zoom);
+
+  String url; url.reserve(160);
+  url  = "https://opensky-network.org/api/states/all?";
+  url += "lamin=" + String(box.south, 5);
+  url += "&lamax=" + String(box.north, 5);
+  url += "&lomin=" + String(box.west, 5);
+  url += "&lomax=" + String(box.east, 5);
 
   HTTPClient http;
   http.setTimeout(STATES_TIMEOUT_MS);
   http.useHTTP10(true);                        // robust path (avoids chunked issues)
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
   http.begin(url);
   http.addHeader("Authorization", "Bearer " + auth.getAccessToken());
   http.addHeader("Connection", "close");
@@ -527,6 +672,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   http.addHeader("Accept-Encoding", "identity");
 
   int httpCode = http.GET();
+  DBG_HTTP("[HTTP] <- %d (OpenSky states)\n", httpCode);
   if (httpCode != 200) {
     Serial.printf("[fetch] HTTP %d from states/all\n", httpCode);
     http.end();
@@ -534,8 +680,8 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     return;
   }
 
-  // Parse JSON (full parse, reliable)
-  JsonDocument doc;
+  // Parse JSON (large)
+  DynamicJsonDocument doc(128 * 1024); // adjust to your RAM; or use filters
   DeserializationError jerr = deserializeJson(doc, http.getStream());
   if (jerr) {
     Serial.printf("[fetch] JSON error: %s\n", jerr.c_str());
@@ -547,8 +693,11 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   long timestamp = doc["time"] | 0;
   JsonArray states = doc["states"].as<JsonArray>();
   int totalAircraft = states.isNull() ? 0 : states.size();
-  Serial.printf("[fetch] parsed states: %d\n", totalAircraft);
-  if (totalAircraft > MAX_AIRCRAFT_LIMIT) {
+  DBG_FETCH("[FETCH] parsed states: %d\n", totalAircraft);
+  dbg_heap("after OpenSky parse");
+
+  // guard: too many rows to render
+  if (totalAircraft > MAX_CACHE_SIZE) {
     drawTooManyAircraftScreen(totalAircraft);
     http.end();
     isBusy = false;
@@ -575,8 +724,6 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
         float  lon      = st[5] | 0.0f;
         float  lat      = st[6] | 0.0f;
         if (icao24 == "" || lat == 0.0f || lon == 0.0f) continue;
-
-        // guard against invalid coords
         if (fabs(lat) > 90.0f || fabs(lon) > 180.0f) continue;
 
         float dist = haversineDistance(centerLat, centerLon, lat, lon);
@@ -607,21 +754,20 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       if (fabs(lat) > 90.0f || fabs(lon) > 180.0f) continue;
 
       // Fill callsign if OpenSky didn't provide it
+      const char* csSrc = "OpenSky";
       callsign.trim();
       if (!callsign.length()) {
         String hexU = icao24; hexU.toUpperCase();
         callsign = getCachedCallsign(hexU);
         if (!callsign.length()) callsign = fetchCallsignFromADSBOne(hexU);
+        csSrc = "cache/ADSB1";
       }
-
 
       float dist = haversineDistance(centerLat, centerLon, lat, lon);
       float brng = calculateBearing(centerLat, centerLon, lat, lon);
 
-      // Get model (do NOT cache Unknown)
+      // Get model (do NOT degrade)
       String model = fetchAircraftModel(icao24, auth);
-
-      // If model came back Unknown, keep any previous good value
       if (!isMeaningfulModel(model)) {
         String prev = lookupCachedModel(icao24);
         if (isMeaningfulModel(prev)) model = prev;
@@ -629,17 +775,24 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
 
       String flightLabel = bestFlightLabel(icao24, callsign);
 
+      DBG_FETCH("[ACFT] %s  cs='%s'(%s)  dist=%.1fkm  brg=%.0f°\n",
+                icao24.c_str(), callsign.c_str(), csSrc, dist, brng);
+
       addToCache(icao24, model, flightLabel, country, dist, brng);
 
-      // mark new row active
+      // mark new row active + freshness bump
       if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         for (int i = 0; i < MAX_CACHE_SIZE; i++) {
-          if (aircraftCache[i].icao24 == icao24) { 
-            aircraftCache[i].active = true; 
-            break; 
+          if (aircraftCache[i].icao24 == icao24) {
+            aircraftCache[i].active = true;
+            aircraftCache[i].lastSeenMs = millis();
+            if (aircraftCache[i].seenCount < 0xFFFF) aircraftCache[i].seenCount++;
+            break;
           }
         }
         if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+      } else {
+        touchIcao(icao24);
       }
     }
   }
@@ -669,43 +822,3 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   http.end();
   isBusy = false;
 }
-
-
-
-// RegisteredOwners + Manufacturer + Type
-
-// RegisteredOwners + Manufacturer + ICAOTypeCode
-
-// RegisteredOwners + normalized(Manufacturer) + Type
-
-// RegisteredOwners + normalized(Manufacturer) + ICAOTypeCode
-
-// RegisteredOwners + ICAOTypeCode
-
-// OperatorFlagCode + Manufacturer + Type
-
-// OperatorFlagCode + Manufacturer + ICAOTypeCode
-
-// OperatorFlagCode + normalized(Manufacturer) + Type
-
-// OperatorFlagCode + normalized(Manufacturer) + ICAOTypeCode
-
-// RegisteredOwners + normalized(Manufacturer)
-
-// OperatorFlagCode + normalized(Manufacturer)
-
-// OperatorFlagCode + ICAOTypeCode
-
-// RegisteredOwners + Type
-
-// OperatorFlagCode + Type
-
-// normalized(Manufacturer) + ICAOTypeCode
-
-// OperatorFlagCode
-
-// RegisteredOwners
-
-// ICAOTypeCode
-
-// Type

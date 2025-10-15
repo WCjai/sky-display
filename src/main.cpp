@@ -11,21 +11,25 @@
 #include "cache.h"
 #include "OpenSkyAuthClient.h"
 
+// ----------------- Pins -----------------
+#define BUTTON_PIN            2   // EXIT to LIVE
+#define UP_BUTTON_PIN        33   // PAGE DOWN (prev)
+#define DOWN_BUTTON_PIN      32   // PAGE UP (next)
+#define EPD_ACTIVITY_LED_PIN 25
+
+// ----------------- Globals -----------------
 OpenSkyAuthClient* pAuthClient = nullptr;
 
-#define BUTTON_PIN       2
-#define UP_BUTTON_PIN    33
-#define DOWN_BUTTON_PIN  32
-#define EPD_ACTIVITY_LED_PIN  25
+// tiny flags set by ISR, consumed in loop()
+volatile bool gHoldRequested = false;
+volatile bool gUpEdge = false;
+volatile bool gDownEdge = false;
+volatile bool gExitEdge = false;
 
-const unsigned long DEBOUNCE_MS = 80;
+// ----------------- Debounce helpers -----------------
+static const unsigned long DEBOUNCE_MS = 80;
 static bool upLast = HIGH, downLast = HIGH, exitLast = HIGH;
 static unsigned long upLastChange = 0, downLastChange = 0, exitLastChange = 0;
-
-volatile bool gHoldRequested = false;
-
-void IRAM_ATTR onUpPress()   { gHoldRequested = true; }
-void IRAM_ATTR onDownPress() { gHoldRequested = true; }
 
 static bool readButtonFalling(int pin, bool& last, unsigned long& lastChange) {
   bool now = digitalRead(pin);
@@ -38,23 +42,47 @@ static bool readButtonFalling(int pin, bool& last, unsigned long& lastChange) {
   return false;
 }
 
+// ----------------- ISRs (IRAM, no heavy work) -----------------
+void IRAM_ATTR onUpPress()   { gUpEdge   = true; }
+void IRAM_ATTR onDownPress() { gDownEdge = true; }
+void IRAM_ATTR onExitPress() { gExitEdge = true; }
+
 // ----------------- FreeRTOS fetch task -----------------
 TaskHandle_t gFetchTaskHandle = nullptr;
 
-void fetchTask(void* pv) {
-  const TickType_t kDelay = pdMS_TO_TICKS(25000);
+static void fetchTask(void* pv) {
+  const TickType_t kDelay = pdMS_TO_TICKS(25000);  // poll cadence
   for (;;) {
     if (WiFi.status() == WL_CONNECTED && pAuthClient) {
+      digitalWrite(EPD_ACTIVITY_LED_PIN, HIGH);
       fetchOpenSkyDataWithBoundingBox(HOME_LAT, HOME_LON, ZOOM, *pAuthClient);
-      printAircraftCacheSorted(); // optional
+      printAircraftCacheSorted(); // optional serial dump
+      digitalWrite(EPD_ACTIVITY_LED_PIN, LOW);
     }
     vTaskDelay(kDelay);
   }
 }
 
+// ----------------- WiFi helpers -----------------
+static bool connectWiFi(unsigned long timeoutMs = 10000) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
+
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < timeoutMs) {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// ----------------- Arduino setup/loop -----------------
 void setup() {
   Serial.begin(115200);
 
+  // NVS (for config portal etc.)
   esp_err_t err = nvs_flash_init();
   if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
@@ -62,70 +90,82 @@ void setup() {
   }
   ESP_ERROR_CHECK(err);
 
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(UP_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(DOWN_BUTTON_PIN, INPUT_PULLUP);
+  // IO
+  pinMode(BUTTON_PIN,       INPUT_PULLUP);
+  pinMode(UP_BUTTON_PIN,    INPUT_PULLUP);
+  pinMode(DOWN_BUTTON_PIN,  INPUT_PULLUP);
   pinMode(EPD_ACTIVITY_LED_PIN, OUTPUT);
-  digitalWrite(EPD_ACTIVITY_LED_PIN, LOW); // off
+  digitalWrite(EPD_ACTIVITY_LED_PIN, LOW);
+
+  // interrupts (edges only set flags)
   attachInterrupt(digitalPinToInterrupt(UP_BUTTON_PIN),   onUpPress,   FALLING);
   attachInterrupt(digitalPinToInterrupt(DOWN_BUTTON_PIN), onDownPress, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN),      onExitPress, FALLING);
 
+  // EPD init — base screen will be managed by display.cpp
   epd.Init();
   epd.Clear();
   full_paint = Paint(full_image, 400, 300);
 
+  // Config portal on boot-hold
   if (digitalRead(BUTTON_PIN) == LOW) {
     drawStatusScreenwithline(
       "Entered Configuration mode",
       "-Connect to \"WC_Sky_display\" WiFi",
-      "-Enter \"192.168.4.1\" in browser",
-      " as URL, form connected device",
-      "-Configure the parameters and save",
-      "-Display will auto-refresh and boot"
+      "-Open http://192.168.4.1 in a browser",
+      "-Fill parameters and save",
+      "-Device will reboot & refresh",
+      ""
     );
-    startConfigMode();
+    startConfigMode(); // blocks until saved / timeout
   }
 
+  // Load config
   loadConfig();
   if (WIFI_SSID.isEmpty() || WIFI_PASSWORD.isEmpty()) {
     drawStatusScreen("No WiFi creds, entering config...");
     startConfigMode();
   }
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false); 
-  WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
-    delay(500);
-    Serial.print(".");
-  }
-  if (WiFi.status() != WL_CONNECTED) {
+  drawStatusScreen("Connecting Wi-Fi...");
+  if (!connectWiFi()) {
     drawStatusScreen("Wi-Fi failed. Reboot to retry.");
     delay(3000);
     ESP.restart();
   }
+  drawStatusScreen("Wi-Fi connected");
 
-  drawStatusScreen("WiFi connected");
+  // Auth client (token fetch deferred to fetcher)
   pAuthClient = new OpenSkyAuthClient(CLIENT_ID.c_str(), CLIENT_SECRET.c_str());
 
-  // Create cache mutex BEFORE any fetch
+  // Create cache & display mutexes BEFORE any fetch/draw
   initCacheMutex();
   initDisplayMutex();
-  
 
-  // Optional initial fetch
-  //fetchOpenSkyDataWithBoundingBox(HOME_LAT, HOME_LON, ZOOM, *pAuthClient);
-
-  // ↑↑ Increased stack from 8192 → 16384 bytes ↑↑
+  // Start fetch task with larger stack (avoid canary in WiFi/json work)
   xTaskCreatePinnedToCore(
-    fetchTask, "fetchTask", 16384, nullptr, 2, &gFetchTaskHandle, 0
+    fetchTask,
+    "fetchTask",
+    16384,          // stack words (~16 KB)
+    nullptr,
+    2,              // prio
+    &gFetchTaskHandle,
+    0               // run on core 0 (keep UI loop on core 1)
   );
+
+  // small boot notice
+  drawStatusScreen("Starting...");
+  delay(400);
 }
 
 void loop() {
-  static uint32_t lastPreemptAt = 0;
+  // Convert ISR edges into debounced actions
+  if (gUpEdge)   { gUpEdge = false;   gHoldRequested = true; }
+  if (gDownEdge) { gDownEdge = false; gHoldRequested = true; }
+  if (gExitEdge) { gExitEdge = false; /* handled in poll below */ }
 
+  // Minimal preemption guard for HOLD
+  static uint32_t lastPreemptAt = 0;
   if (gHoldRequested) {
     gHoldRequested = false;
     uint32_t now = millis();
@@ -135,45 +175,45 @@ void loop() {
     }
   }
 
-  // UP
+  // ---- Button polling with debounce (safe, no heap use) ----
+  // UP: go HOLD (if not) else previous page
   if (readButtonFalling(UP_BUTTON_PIN, upLast, upLastChange)) {
     if (getDisplayMode() != HOLD_MODE) {
-      setDisplayMode(HOLD_MODE);   // now this ALSO draws page 1
+      setDisplayMode(HOLD_MODE);
     } else {
-      pageDown();                  // previous page (does partial draw inside)
+      pageDown();  // previous page
     }
   }
 
-  // DOWN
+  // DOWN: go HOLD (if not) else next page
   if (readButtonFalling(DOWN_BUTTON_PIN, downLast, downLastChange)) {
     if (getDisplayMode() != HOLD_MODE) {
-      setDisplayMode(HOLD_MODE);   // enters HOLD and draws page 1
-      pageUp();                    // go to page 2 right away if you prefer
+      setDisplayMode(HOLD_MODE);
+      pageUp();    // jump to next immediately if you like
     } else {
-      pageUp();                    // next page
+      pageUp();    // next page
     }
   }
 
-  // EXIT to LIVE
+  // EXIT: back to LIVE
   if (readButtonFalling(BUTTON_PIN, exitLast, exitLastChange)) {
-    setDisplayMode(LIVE_MODE);     // draws immediately
+    setDisplayMode(LIVE_MODE);
   }
 
+  // ---- Wi-Fi keepalive (non-blocking) ----
   if (WiFi.status() != WL_CONNECTED) {
-    drawStatusScreen("WiFi lost! Reconnecting...");
+    drawStatusScreen("Wi-Fi lost! Reconnecting...");
     WiFi.disconnect();
-    WiFi.begin(WIFI_SSID.c_str(), WIFI_PASSWORD.c_str());
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-      delay(500);
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      drawStatusScreen("WiFi reconnected");
-      delay(1000);
+    if (connectWiFi()) {
+      drawStatusScreen("Wi-Fi reconnected");
+      delay(800);
     } else {
+      // leave loop early, let next tick retry
+      delay(5);
       return;
     }
   }
 
+  // breath
   delay(1);
 }

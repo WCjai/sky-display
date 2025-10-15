@@ -8,7 +8,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-extern volatile bool gHoldRequested;
+extern volatile bool gHoldRequested; // defined in main.cpp
 
 // -------- EPD & buffers --------
 Epd epd;
@@ -18,10 +18,9 @@ Paint full_paint(full_image, 400, 300);
 unsigned char image[400 / 8 * 28];
 Paint paint(image, 400, 28);
 
-static constexpr int kTimeBandH = 140;               // tall band for the big clock
+static constexpr int kTimeBandH = 140;               // tall band for big clock
 static unsigned char time_image[400 / 8 * kTimeBandH];
 static Paint time_paint(time_image, 400, kTimeBandH);
-
 
 // -------- Display mutex --------
 SemaphoreHandle_t gDisplayMutex = nullptr;
@@ -31,6 +30,7 @@ void initDisplayMutex() {
     gDisplayMutex = xSemaphoreCreateMutex();
   }
 }
+
 struct ScopedDispLock {
   bool locked{false};
   ScopedDispLock(TickType_t to = portMAX_DELAY) {
@@ -64,6 +64,12 @@ struct RowView {
   float  bearing;
   bool   active;
 };
+
+// --------- STATIC BUFFERS (moved off task stacks) ---------
+static RowView s_rows_live[MAX_CACHE_SIZE];
+static RowView s_rows_hold[MAX_CACHE_SIZE];
+static RowView s_rows_full[MAX_CACHE_SIZE];
+
 
 // ---------- Utilities ----------
 void ensurePartialPrimed() {
@@ -99,61 +105,49 @@ static void cpyBound(char* dst, size_t dstsz, const String& src) {
   dst[n] = '\0';
 }
 
+
 void drawTooManyAircraftScreen(int total) {
   ScopedDispLock _;
 
-  // Make sure we can do a full push quickly
   ensurePartialPrimed();
-
   full_paint.Clear(UNCOLORED);
 
-  // Big title
   const char* title = "TOO MANY AIRCRAFT";
   int tX = (kScreenW - (int)strlen(title) * Font16.Width) / 2;
   full_paint.DrawStringAt(tX, 30, title, &Font16, COLORED);
-  full_paint.DrawStringAt(tX + 1, 30, title, &Font16, COLORED); // bold-ish
+  full_paint.DrawStringAt(tX + 1, 30, title, &Font16, COLORED);
 
-  // Count line
   char countLine[48];
   snprintf(countLine, sizeof(countLine), "Total in view: %d", total);
   int cX = (kScreenW - (int)strlen(countLine) * Font16.Width) / 2;
   full_paint.DrawStringAt(cX, 90, countLine, &Font16, COLORED);
 
-  // Hint line
   const char* hint = "HINT: reduce map zoom, then reboot";
   int hX = (kScreenW - (int)strlen(hint) * Font16.Width) / 2;
   full_paint.DrawStringAt(hX, 130, hint, &Font16, COLORED);
 
-  // Footer note so it's obvious we halted
   const char* halted = "Fetching halted";
   int fX = (kScreenW - (int)strlen(halted) * Font16.Width) / 2;
   full_paint.DrawStringAt(fX, kScreenH - Font16.Height - 10, halted, &Font16, COLORED);
 
-  // Single full-frame push (fast LUT)
   epd.Init_Fast(0);
   epd.Display(full_paint.GetImage());
 }
 
-
 // get 2-letter compass suffix without heap allocs
 static void compass2(float bearing, char out[3]) {
-  // N, NE, E, SE, S, SW, W, NW
   static const char table[8][3] = {"N ","NE","E ","SE","S ","SW","W ","NW"};
   int idx = (int)lroundf(bearing / 45.0f);
   if (idx < 0) idx = 0;
   if (idx > 8) idx = 8;
-  if (idx == 8) idx = 0; // 360 -> N
+  if (idx == 8) idx = 0;
   out[0] = table[idx][0];
   out[1] = table[idx][1];
   out[2] = '\0';
 }
 
-
 // Case-insensitive compare
 static bool ieq(const char* a, const char* b) { return strcasecmp(a, b) == 0; }
-
-// Known long→short mappings (kept small; extend as you like)
-// Stored in flash (RODATA) because they're const.
 struct CountryMap { const char* full; const char* sh; };
 static const CountryMap kCountryMap[] = {
   {"United Arab Emirates", "UAE"},
@@ -184,7 +178,6 @@ static const CountryMap kCountryMap[] = {
   {"Palestine, State of", "Palestine"},
   {"Macedonia, the former Yugoslav Republic of", "North Macedonia"},
 };
-
 static const char* mapCountryShort(const char* name) {
   if (!name || !*name) return nullptr;
   for (size_t i = 0; i < sizeof(kCountryMap)/sizeof(kCountryMap[0]); ++i) {
@@ -198,43 +191,27 @@ static const char* mapCountryShort(const char* name) {
 static void makeAcronym(const char* in, char* out, size_t outsz) {
   if (!in || !*in || outsz == 0) { if (outsz) out[0] = '\0'; return; }
   const char* stop1 = "of"; const char* stop2 = "and"; const char* stop3 = "the";
-
-  size_t n = 0;
-  bool inWord = false;
-  char word[24]; int wlen = 0;
-
-  auto flushWord = [&](void){
+  size_t n = 0; bool inWord = false; char word[24]; int wlen = 0;
+  auto flushWord = [&](){
     if (wlen <= 0) return;
     word[wlen] = '\0';
-    // lowercase copy for stopword check
     char lw[24]; for (int i=0;i<=wlen && i<24;i++) lw[i] = tolower((unsigned char)word[i]);
     if (!(ieq(lw, stop1) || ieq(lw, stop2) || ieq(lw, stop3))) {
-      // take first alphabetic char
-      for (int i=0;i<wlen;i++) {
-        if (isalpha((unsigned char)word[i])) {
-          if (n + 1 < outsz) out[n++] = (char)toupper((unsigned char)word[i]);
-          break;
-        }
+      for (int i=0;i<wlen;i++) if (isalpha((unsigned char)word[i])) {
+        if (n + 1 < outsz) out[n++] = (char)toupper((unsigned char)word[i]);
+        break;
       }
     }
     wlen = 0;
   };
-
   for (const char* p = in; *p; ++p) {
     char c = *p;
-    if (isalpha((unsigned char)c)) {
-      if (!inWord) { inWord = true; wlen = 0; }
-      if (wlen < (int)sizeof(word)-1) word[wlen++] = c;
-    } else {
-      if (inWord) { flushWord(); inWord = false; }
-    }
+    if (isalpha((unsigned char)c)) { if (!inWord) { inWord = true; wlen = 0; } if (wlen < (int)sizeof(word)-1) word[wlen++] = c; }
+    else { if (inWord) { flushWord(); inWord = false; } }
   }
   if (inWord) flushWord();
-
-  if (n == 0) { // fallback: first letters/numbers found
-    for (const char* p = in; *p && n + 1 < outsz; ++p) {
-      if (isalnum((unsigned char)*p)) out[n++] = (char)toupper((unsigned char)*p);
-    }
+  if (n == 0) {
+    for (const char* p = in; *p && n + 1 < outsz; ++p) if (isalnum((unsigned char)*p)) out[n++] = (char)toupper((unsigned char)*p);
   }
   out[n] = '\0';
 }
@@ -244,28 +221,15 @@ static void makeAcronym(const char* in, char* out, size_t outsz) {
 static void shortenCountryForWidth(const char* in, char* out, size_t outsz, int maxChars) {
   if (!in) in = "";
   if (outsz == 0) return;
-
   const char* mapped = mapCountryShort(in);
   const char* src = mapped ? mapped : in;
-
-  // Copy src into out
   size_t len = strnlen(src, outsz - 1);
   memcpy(out, src, len);
   out[len] = '\0';
-
   if (maxChars <= 0) { out[0] = '\0'; return; }
   if ((int)len <= maxChars) return;
-
-  // Try acronym
-  char acro[16];
-  makeAcronym(src, acro, sizeof(acro));
-  if ((int)strlen(acro) <= maxChars) {
-    strncpy(out, acro, outsz-1);
-    out[outsz-1] = '\0';
-    return;
-  }
-
-  // Last resort: hard truncate
+  char acro[16]; makeAcronym(src, acro, sizeof(acro));
+  if ((int)strlen(acro) <= maxChars) { strncpy(out, acro, outsz-1); out[outsz-1] = '\0'; return; }
   out[maxChars] = '\0';
 }
 
@@ -297,6 +261,7 @@ static void recalcPagingFromActive(int activeCount) {
   if (sCurrentPage < 1) sCurrentPage = 1;
 }
 
+
 // -------- Status screens (locked) --------
 void drawStatusScreen(const char* msg) {
   ScopedDispLock _;
@@ -313,6 +278,7 @@ void drawStatusScreen(const char* msg) {
   full_paint.DrawStringAt(x, y, msg, font, COLORED);
   epd.Display(full_paint.GetImage());
 }
+
 
 void drawStatusScreenwithline(const char* line1,
                               const char* line2,
@@ -757,7 +723,7 @@ static void ParseHeaderParts(const char* src,
 void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFromAPI) {
   if (sMode == HOLD_MODE) return;
 
-  RowView rows[MAX_CACHE_SIZE];
+  RowView* rows = s_rows_live;                  // static buffer
   int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
   std::sort(rows, rows + active, [](const RowView& a, const RowView& b){
     return a.distance < b.distance;
@@ -1005,8 +971,7 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
 
 // -------- HOLD (partial page renderer) --------
 void drawHoldPagePartial() {
-  // Snapshot & sort
-  RowView rows[MAX_CACHE_SIZE];
+  RowView* rows = s_rows_hold;                  // static buffer
   int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
   std::sort(rows, rows + active, [](const RowView& a, const RowView& b){
     return a.distance < b.distance;
@@ -1220,11 +1185,10 @@ void drawHoldPagePartial() {
 DisplayMode getDisplayMode() { return sMode; }
 
 void setDisplayMode(DisplayMode m) {
-  // Guard: don’t enter HOLD when <5 aircraft
+  // Guard: don’t enter HOLD when <6 aircraft
   if (m == HOLD_MODE && getActiveCount() < 6) return;
 
   if (sMode == m) {
-    // If pressing again in HOLD, redraw current page
     if (m == HOLD_MODE) {
       recalcPagingFromActive(getActiveCount());
       sCurrentPage = std::max(1, std::min(sCurrentPage, sTotalPages));
@@ -1234,20 +1198,19 @@ void setDisplayMode(DisplayMode m) {
     return;
   }
 
-  // SWITCH
   sMode = m;
 
   if (sMode == HOLD_MODE) {
     ensurePartialPrimed();
     recalcPagingFromActive(getActiveCount());
     sCurrentPage = 1;
-    drawHoldPagePartial();                // partial-only
+    drawHoldPagePartial();
   } else {
-    // LIVE mode: partial-only as well (no Clear)
     ensurePartialPrimed();
     drawAircraftInfoToDisplay_Partial(sLastTimeStr, -1);
   }
 }
+
 
 void pageUp() {
   if (sMode != HOLD_MODE) return;
@@ -1265,7 +1228,7 @@ void pageDown() {
 
 // Optional: full-frame HOLD (kept for API completeness)
 static void drawHoldPageFullBuffer() {
-  RowView rows[MAX_CACHE_SIZE];
+  RowView* rows = s_rows_full;                  // static buffer
   int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
   std::sort(rows, rows + active, [](const RowView& a, const RowView& b){
     return a.distance < b.distance;
