@@ -11,7 +11,7 @@
 
 // ===== DEBUG SWITCHES (set to 1 to enable) =====
 #define DEBUG_FETCH   1   // high-level flow (OpenSky pull, per-aircraft summary)
-#define DEBUG_MODEL   1   // model provider hits/misses (HexDB/OpenSky/PlaneSpotters/ADSB.one)
+#define DEBUG_MODEL   1   // model provider hits/misses (HexDB/OpenSky/PlaneSpotters/ADSB.one/ADSBdb-airline)
 #define DEBUG_ROUTE   1   // callsign + route (ADSB.one callsign & ADSBdb route)
 #define DEBUG_CACHE   1   // cache pruning sizes
 #define DEBUG_HTTP    1   // per-request URL + HTTP code
@@ -73,6 +73,7 @@
 // Route/callsign cache hard caps
 static const size_t ROUTE_MAX_ENTRIES    = 512;
 static const size_t CALLSIGN_MAX_ENTRIES = 512;
+static const size_t AIRLINE_MAX_ENTRIES  = 512;
 
 // Pruning cadence
 static uint32_t gLastPruneMs = 0;
@@ -86,6 +87,10 @@ static std::map<String, RouteCacheEntry> gRouteCache;   // key = callsign (norma
 
 struct CallsignCacheEntry { String callsign; uint32_t expiryMs; };
 static std::map<String, CallsignCacheEntry> gHexToCallsign; // key = icao24 (UPPER)
+
+// NEW: callsign → airline.name cache (for airline-name-as-model fallback)
+struct AirlineCacheEntry { String name; uint32_t expiryMs; };
+static std::map<String, AirlineCacheEntry> gCallsignToAirline; // key = callsign (normalized)
 
 // ---------- token buckets (keep you < ~8 rps each provider) ----------
 static uint32_t routeTokens = 8, routeLastRefill = 0;   // adsbdb
@@ -207,13 +212,25 @@ static String getCachedCallsign(const String& hex) {
   return it->second.callsign;
 }
 
+// airline cache helpers (callsign → airline name)
+static void cacheAirline(const String& cs, const String& name, uint32_t ttlMsHit=10*60*1000UL, uint32_t ttlMsMiss=60*1000UL) {
+  uint32_t now = millis();
+  gCallsignToAirline[cs] = { name, now + (name.length() ? ttlMsHit : ttlMsMiss) };
+}
+static String getCachedAirline(const String& cs) {
+  auto it = gCallsignToAirline.find(cs);
+  if (it == gCallsignToAirline.end()) return "";
+  if ((int32_t)(it->second.expiryMs - millis()) <= 0) { gCallsignToAirline.erase(it); return ""; }
+  return it->second.name;
+}
+
 // map pruning
 static void pruneSmallMaps() {
   const uint32_t now = millis();
   if ((uint32_t)(now - gLastPruneMs) < 30000UL) return; // every 30s
   gLastPruneMs = now;
 
-  size_t beforeR = gRouteCache.size(), beforeC = gHexToCallsign.size();
+  size_t beforeR = gRouteCache.size(), beforeC = gHexToCallsign.size(), beforeA = gCallsignToAirline.size();
 
   // remove expired entries
   for (auto it = gRouteCache.begin(); it != gRouteCache.end(); ) {
@@ -224,14 +241,19 @@ static void pruneSmallMaps() {
     if ((int32_t)(it->second.expiryMs - now) <= 0) it = gHexToCallsign.erase(it);
     else ++it;
   }
+  for (auto it = gCallsignToAirline.begin(); it != gCallsignToAirline.end(); ) {
+    if ((int32_t)(it->second.expiryMs - now) <= 0) it = gCallsignToAirline.erase(it);
+    else ++it;
+  }
 
-  // hard caps
-  while (gRouteCache.size()    > ROUTE_MAX_ENTRIES   && !gRouteCache.empty())    gRouteCache.erase(gRouteCache.begin());
-  while (gHexToCallsign.size() > CALLSIGN_MAX_ENTRIES&& !gHexToCallsign.empty()) gHexToCallsign.erase(gHexToCallsign.begin());
+  // hard caps (simple erase from begin; maps are small)
+  while (gRouteCache.size()    > ROUTE_MAX_ENTRIES    && !gRouteCache.empty())    gRouteCache.erase(gRouteCache.begin());
+  while (gHexToCallsign.size() > CALLSIGN_MAX_ENTRIES && !gHexToCallsign.empty()) gHexToCallsign.erase(gHexToCallsign.begin());
+  while (gCallsignToAirline.size() > AIRLINE_MAX_ENTRIES && !gCallsignToAirline.empty()) gCallsignToAirline.erase(gCallsignToAirline.begin());
 
-  DBG_CACHE("[RCACHE] size=%u  [CCACHE] size=%u (before %u/%u)\n",
-    (unsigned)gRouteCache.size(), (unsigned)gHexToCallsign.size(),
-    (unsigned)beforeR, (unsigned)beforeC);
+  DBG_CACHE("[RCACHE] size=%u  [CCACHE] size=%u  [ACACHE] size=%u (before %u/%u/%u)\n",
+    (unsigned)gRouteCache.size(), (unsigned)gHexToCallsign.size(), (unsigned)gCallsignToAirline.size(),
+    (unsigned)beforeR, (unsigned)beforeC, (unsigned)beforeA);
 }
 
 // ---------------- Geometry helpers ----------------
@@ -272,6 +294,7 @@ static float calculateBearing(float lat1, float lon1, float lat2, float lon2) {
   if (brng < 0) brng += 360.0f;
   return brng;
 }
+
 
 // ---------------- External APIs ----------------
 static String fetchFromPlaneSpotters(const String& icao24) {
@@ -537,6 +560,44 @@ static String fetchRouteLabelForCallsign(String callsign) {
   return label;
 }
 
+// NEW: airline-name fetcher (for last-ditch model fill)
+static String fetchAirlineNameFromADSBdb(String callsign) {
+  callsign.trim();
+  callsign.replace(" ", "");
+  if (!callsign.length()) return "";
+
+  // cache first (positive or negative)
+  {
+    String hit = getCachedAirline(callsign);
+    if (hit.length() || gCallsignToAirline.count(callsign)) {
+      DBG_MODEL("[MODEL] airline cache %s -> '%s'\n", callsign.c_str(), hit.c_str());
+      return hit;
+    }
+  }
+
+  if (!allowRouteCall()) return ""; // reuse route token bucket
+
+  HTTPClient http;
+  http.setTimeout(API_TIMEOUT_MS);
+  String url = "https://api.adsbdb.com/v0/callsign/" + callsign;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
+  int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (ADSBdb airline)\n", code);
+  if (code != 200) { http.end(); cacheAirline(callsign, ""); return ""; }
+
+  StaticJsonDocument<4096> doc;
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) { cacheAirline(callsign, ""); DBG_MODEL("[MODEL] ADSBdb airline JSON error\n"); return ""; }
+
+  String name = (const char*)(doc["response"]["flightroute"]["airline"]["name"] | "");
+  name.trim();
+  cacheAirline(callsign, name);
+  if (name.length()) DBG_MODEL("[MODEL] ADSBdb airline '%s' for %s\n", name.c_str(), callsign.c_str());
+  return name;
+}
+
 static bool modelFetchAllowed() { return (int32_t)(gModelFailUntilMs - millis()) <= 0; }
 
 static String bestFlightLabel(const String& icao24, const String& callsignIn) {
@@ -560,66 +621,61 @@ static String bestFlightLabel(const String& icao24, const String& callsignIn) {
   return cs;
 }
 
-// ---------------- Public: aircraft model (never degrade) ----------------
-// String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
-//   String cached = lookupCachedModel(icao24);
-//   if (isMeaningfulModel(cached)) {
-//     DBG_MODEL("[MODEL] cache hit %s -> '%s'\n", icao24.c_str(), cached.c_str());
-//     return cached;
-//   }
-
-//   if (!modelFetchAllowed()) {
-//     DBG_MODEL("[MODEL] backoff active; returning cached/Unknown for %s\n", icao24.c_str());
-//     if (isMeaningfulModel(cached)) return cached;
-//     return "Unknown";
-//   }
-
-//   String model = fetchFromHexDB(icao24);
-//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=HexDB   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
-//   model = fetchFromOpenSkyMeta(icao24, auth);
-//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=OpenSky %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
-//   model = fetchFromPlaneSpotters(icao24);
-//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=PSpot   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
-//   model = fetchModelFromADSBOneDesc(icao24);
-//   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=ADSB1   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
-
-//   DBG_MODEL("[MODEL] miss all providers for %s; backing off\n", icao24.c_str());
-//   gModelFailUntilMs = millis() + 15000UL;
-//   if (isMeaningfulModel(cached)) return cached;
-//   return "Unknown";
-
-// WIN:
-//   addToCache(icao24, model, "", "", -1, -1);
-//   return model;
-// }
-
-String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth) {
+// ---------------- Public: aircraft model (with airline-name fallback) ----------------
+String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth, const String& callsignOpt) {
   // 0) If we already have a good one, use it
   String cached = lookupCachedModel(icao24);
-  auto isMeaningful = [](const String& s){
-    String t = s; t.trim();
-    return t.length() && !t.equalsIgnoreCase("unknown") && !t.equalsIgnoreCase("null");
-  };
-  if (isMeaningful(cached)) {
+  if (isMeaningfulModel(cached)) {
     DBG_MODEL("[MODEL] cache hit %s -> '%s'\n", icao24.c_str(), cached.c_str());
     return cached;
   }
 
+  // If we recently failed across providers, skip hitting them this tick
+  if (!modelFetchAllowed()) {
+    DBG_MODEL("[MODEL] backoff active; returning cached/Unknown for %s\n", icao24.c_str());
+    if (isMeaningfulModel(cached)) return cached;
+    // still allow airline fallback if we have callsign (cheap)
+    if (callsignOpt.length()) {
+      String cs = callsignOpt; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
+      String airline = fetchAirlineNameFromADSBdb(cs);
+      if (isMeaningfulModel(airline)) {
+        // FIX: provide all 6 args (callsign, country empty; dist/bearing -1)
+        addToCache(icao24, airline, "", "", -1, -1);
+        return airline;
+      }
+    }
+    return "Unknown";
+  }
+
   // 1) Try providers in strict order
   String model = fetchFromHexDB(icao24);
-  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=HexDB   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+  if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=HexDB   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
 
   model = fetchFromOpenSkyMeta(icao24, auth);
-  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=OpenSky %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+  if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=OpenSky %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
 
   model = fetchFromPlaneSpotters(icao24);
-  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=PSpot   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+  if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=PSpot   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
 
   model = fetchModelFromADSBOneDesc(icao24);
-  if (isMeaningful(model)) { DBG_MODEL("[MODEL] win=ADSB1   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
+  if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=ADSB1   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
 
-  // 2) Everything failed → declare Unknown (explicitly non-empty)
+  // 2) Last-ditch: if still unknown but callsign is known, use airline.name
+  if (callsignOpt.length()) {
+    String cs = callsignOpt; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
+    if (cs.length()) {
+      String airline = fetchAirlineNameFromADSBdb(cs);
+      if (isMeaningfulModel(airline)) {
+        DBG_MODEL("[MODEL] win=ADSBdb-airline %s -> '%s'\n", icao24.c_str(), airline.c_str());
+        addToCache(icao24, airline, "", "", -1, -1);
+        return airline;
+      }
+    }
+  }
+
+  // 3) Everything failed → set explicit non-empty Unknown (do NOT cache)
   DBG_MODEL("[MODEL] all providers failed for %s -> 'Unknown'\n", icao24.c_str());
+  gModelFailUntilMs = millis() + 15000UL; // brief backoff
   return "Unknown";
 
 WIN:
@@ -627,6 +683,99 @@ WIN:
   addToCache(icao24, model, "", "", -1, -1);
   return model;
 }
+
+// Re-run callsign/route lookups only for sparse rows.
+// We throttle to a few per tick and respect token buckets & negative caches.
+static void reenrichSparseEntries(int maxPerTick = 3) {
+  struct Cand {
+    String icao24;
+    String label;     // current callsign/route label field in cache
+    String country;
+    float  distance;
+    float  bearing;
+  };
+
+  // 1) Snapshot candidates quickly under mutex (no network here)
+  Cand todo[8];
+  int n = 0;
+
+  if (!gCacheMutex || xSemaphoreTake(gCacheMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    for (int i = 0; i < MAX_CACHE_SIZE && n < (int)(sizeof(todo)/sizeof(todo[0])); ++i) {
+      const auto& e = aircraftCache[i];
+      if (e.icao24.length() == 0) continue;
+
+      // “Sparse” if we have nothing in the callsign/route column,
+      // or if it looks like a raw callsign (no AAA-BBB route).
+      bool missing = (e.callsign.length() == 0);
+      bool likelyRawCallsign = (!missing && e.callsign.indexOf('-') == -1);
+
+      if (missing || likelyRawCallsign) {
+        todo[n++] = Cand{
+          e.icao24,
+          e.callsign,
+          e.country,
+          e.distance,
+          e.bearing
+        };
+      }
+    }
+    if (gCacheMutex) xSemaphoreGive(gCacheMutex);
+  }
+
+  if (n == 0) return;
+
+  // 2) Process a limited number per tick (network allowed here)
+  int done = 0;
+  for (int i = 0; i < n && done < maxPerTick; ++i) {
+    const auto& c = todo[i];
+
+    // If we already have a route (AAA-BBB), skip
+    if (c.label.length() && c.label.indexOf('-') != -1) continue;
+
+    // Try to get/refresh callsign from ADSB.one
+    String hexU = c.icao24; hexU.toUpperCase();
+    String callsign = getCachedCallsign(hexU);
+    if (!callsign.length()) {
+      // May be throttled; if throttled, skip this candidate now
+      if (!allowADSBCall()) continue;
+      callsign = fetchCallsignFromADSBOne(hexU);  // caches hit/miss internally
+    }
+
+    // If still no callsign, nothing to do
+    if (!callsign.length()) continue;
+
+    // With callsign in hand, try to get route from ADSBdb
+    String cs = callsign; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
+
+    // Respect negative cache: if present but empty, routeCacheHas(cs) will be true
+    String cachedRoute = getCachedRoute(cs);
+    bool haveCached = routeCacheHas(cs);
+    String label = cachedRoute;
+
+    if (!haveCached) {
+      // Maybe throttled; if throttled, skip for now
+      if (!allowRouteCall()) continue;
+      label = fetchRouteLabelForCallsign(cs);  // caches hit (10m) / miss (60s)
+    }
+
+    // Finalize what to display:
+    // - Prefer route "AAA-BBB" if we got one,
+    // - Else use the normalized callsign itself.
+    String finalLabel = label.length() ? label : cs;
+
+    // 3) Write back into cache (preserve model/country/dist/bearing)
+    // We don't change model here; just update the callsign/route field.
+    // addToCache merges fields when non-empty.
+    addToCache(c.icao24, /*model*/"", finalLabel, c.country, c.distance, c.bearing);
+
+    DBG_ROUTE("[RETRY] %s -> callsign='%s'  route='%s'  final='%s'\n",
+              c.icao24.c_str(), callsign.c_str(), label.c_str(), finalLabel.c_str());
+
+    ++done;
+    yield();
+  }
+}
+
 
 // ---------------- Main fetch ----------------
 void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom, OpenSkyAuthClient& auth) {
@@ -766,8 +915,8 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       float dist = haversineDistance(centerLat, centerLon, lat, lon);
       float brng = calculateBearing(centerLat, centerLon, lat, lon);
 
-      // Get model (do NOT degrade)
-      String model = fetchAircraftModel(icao24, auth);
+      // Get model with airline-name fallback (do NOT degrade on later cycles)
+      String model = fetchAircraftModel(icao24, auth, callsign);
       if (!isMeaningfulModel(model)) {
         String prev = lookupCachedModel(icao24);
         if (isMeaningfulModel(prev)) model = prev;
@@ -806,7 +955,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
     }
   }
   if (locked3) xSemaphoreGive(gCacheMutex);
-
+  reenrichSparseEntries(/*maxPerTick=*/3);
   // ---- Draw only in LIVE ----
   if (getDisplayMode() == LIVE_MODE) {
     ensurePartialPrimed();
@@ -818,7 +967,9 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
       lastHadAircraft = true;
     }
   }
+  
 
   http.end();
+  
   isBusy = false;
 }
