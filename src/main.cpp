@@ -10,7 +10,7 @@
 #include "fetch.h"
 #include "cache.h"
 #include "OpenSkyAuthClient.h"
-
+#include "imagedata.h"
 // ----------------- Pins -----------------
 #define BUTTON_PIN            2   // EXIT to LIVE
 #define UP_BUTTON_PIN        33   // PAGE DOWN (prev)
@@ -109,14 +109,12 @@ void setup() {
 
   // Config portal on boot-hold
   if (digitalRead(BUTTON_PIN) == LOW) {
-    drawStatusScreenwithline(
-      "Entered Configuration mode",
-      "-Connect to \"WC_Sky_display\" WiFi",
-      "-Open http://192.168.4.1 in a browser",
-      "-Fill parameters and save",
-      "-Device will reboot & refresh",
-      ""
-    );
+
+  /* This displays an image */
+    epd.Init();
+    Serial.print("show 2-gray image\r\n");
+    epd.Display(gImage_atc);
+    delay(1000);
     startConfigMode(); // blocks until saved / timeout
   }
 
