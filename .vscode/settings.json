@@ -13,5 +13,6 @@
         "utility": "cpp",
         "vector": "cpp",
         "ctime": "cpp"
-    }
+    },
+    "idf.portWin": "COM3"
 }

@@ -112,7 +112,6 @@ void setup() {
 
   /* This displays an image */
     epd.Init();
-    Serial.print("show 2-gray image\r\n");
     epd.Display(gImage_atc);
     delay(1000);
     startConfigMode(); // blocks until saved / timeout
@@ -125,13 +124,14 @@ void setup() {
     startConfigMode();
   }
 
-  drawStatusScreen("Connecting Wi-Fi...");
+  //drawStatusScreen("Connecting Wi-Fi...");
   if (!connectWiFi()) {
     drawStatusScreen("Wi-Fi failed. Reboot to retry.");
     delay(3000);
     ESP.restart();
   }
-  drawStatusScreen("Wi-Fi connected");
+  //drawStatusScreen("Wi-Fi connected");
+  epd.Display(gImage_alive);
 
   // Auth client (token fetch deferred to fetcher)
   pAuthClient = new OpenSkyAuthClient(CLIENT_ID.c_str(), CLIENT_SECRET.c_str());
@@ -139,7 +139,15 @@ void setup() {
   // Create cache & display mutexes BEFORE any fetch/draw
   initCacheMutex();
   initDisplayMutex();
+// epd.Init();
+// epd.Clear();
+// full_paint = Paint(full_image, 400, 300);
 
+// Show a dummy live page at boot for 2s, then carry on
+//debugShowDummyLiveBoot();
+//debugShowDummyHoldBoot();
+//drawHoldPagePartial();
+delay(2000);
   // Start fetch task with larger stack (avoid canary in WiFi/json work)
   xTaskCreatePinnedToCore(
     fetchTask,
@@ -152,7 +160,7 @@ void setup() {
   );
 
   // small boot notice
-  drawStatusScreen("Starting...");
+  //drawStatusScreen("Starting...");
   delay(400);
 }
 
