@@ -520,7 +520,7 @@ static String routeLabelFromFlightroute(JsonObject fr) {
   String ds = (String)(d["iata_code"] | "");
   if (!os.length()) os = (String)(o["icao_code"] | "");
   if (!ds.length()) ds = (String)(d["icao_code"] | "");
-  if (os.length() && ds.length()) return os + "-" + ds;
+  if (os.length() && ds.length()) return os + "%" + ds;
   return "";
 }
 

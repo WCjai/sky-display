@@ -12,7 +12,9 @@
         "type_traits": "cpp",
         "utility": "cpp",
         "vector": "cpp",
-        "ctime": "cpp"
+        "ctime": "cpp",
+        "algorithm": "cpp",
+        "cstring": "cpp"
     },
     "idf.portWin": "COM3"
 }
