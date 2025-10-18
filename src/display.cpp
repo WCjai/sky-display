@@ -552,100 +552,16 @@ void drawNoAircraftScreen(time_t timestamp) {
   int hT = dispHour / 10, hO = dispHour % 10;
   int mT = min / 10,      mO = min % 10;
 
-  const int D_W       = 70;
   const int D_H       = kTimeBandH;
-  const int SEG_T     = 12;
   const int GAP_DIG   = 12;
-  const int COLON_W   = SEG_T;
   const int AMPM_GAP  = 10;
 
-  bool twoDigitHour     = is24 ? true : (dispHour >= 10);
+  bool twoDigitHour    = is24 ? true : (dispHour >= 10);
   const int GAP_COLON_L = 10;
-  const int GAP_COLON_R = twoDigitHour ? 10 : 0;
-  bool hideLeadingZero  = (!is24 && !twoDigitHour);
+  const int GAP_COLON_R = twoDigitHour ? 10 : 0 + 10;
+  bool hideLeadingZero = (!is24 && !twoDigitHour);
 
-  int digitsW = 0;
-  if (!hideLeadingZero) { digitsW += D_W; digitsW += GAP_DIG; }
-  digitsW += D_W;
-  digitsW += GAP_COLON_L + COLON_W + GAP_COLON_R;
-  digitsW += D_W + GAP_DIG + D_W;
-
-  int ampmW = (!is24) ? (AMPM_GAP + (int)strlen(ampm) * Font24.Width) : 0; // measure AM/PM in Font24
-  int totalW = digitsW + ampmW;
-  int startX_time = (kScreenW - totalW) / 2;  // (avoid name clash with header)
-  int startY_time = (kScreenH - D_H) / 2;
-
-  // ------------------------------------------------------------
-  // 1) HEADER band (weekday pill + "dd month yyyy", all centered)
-  // ------------------------------------------------------------
-  char wday[24] = {0}, mon[24] = {0}, yearStr[8] = {0};
-  strftime(wday,   sizeof(wday), "%A", ti);     // e.g., "Saturday"
-  strftime(mon,    sizeof(mon),  "%B", ti);     // e.g., "September"
-  strftime(yearStr,sizeof(yearStr),"%Y", ti);   // "2025"
-
-  // Lowercase weekday & month to match your example
-  for (char* p = wday; *p; ++p) *p = (char)tolower((unsigned char)*p);
-  for (char* p = mon;  *p; ++p) *p = (char)tolower((unsigned char)*p);
-
-  // Day number without leading zero
-  char dayNum[4];
-  snprintf(dayNum, sizeof(dayNum), "%d", ti->tm_mday);
-
-  // Measure header pieces
-  const int fw = Font16.Width;
-  const int fh = Font16.Height;
-
-  // Pill metrics
-  const int pillPadX = 8;
-  const int pillPadY = 4;
-  int wdayW = (int)strlen(wday) * fw;
-  int pillW = wdayW + pillPadX * 2;
-  int pillH = fh + pillPadY * 2;
-  if (pillH > kLineH - 2) pillH = kLineH - 2;
-  int pillR = pillH / 2;
-
-  // Gap between pill and rest of date
-  const int gap = 12;
-
-  // Build "17 september 2025"
-  char rest[64];
-  snprintf(rest, sizeof(rest), "%s %s %s", dayNum, mon, yearStr);
-  int restW = (int)strlen(rest) * fw;
-
-  int headerW   = pillW + gap + restW;
-  int pillY     = (kLineH - pillH) / 2;
-  int headerX   = (kScreenW - headerW) / 2;
-
-  // Clear header band
-  paint.Clear(UNCOLORED);
-
-  // Draw pill
-  DrawRoundedRectFilled(paint, headerX, pillY, pillW, pillH, pillR, COLORED);
-
-  // Weekday in white inside pill
-  int wdayX = headerX + pillPadX;
-  int wdayY = pillY + (pillH - fh) / 2;
-  paint.DrawStringAt(wdayX, wdayY, wday, &Font16, UNCOLORED);
-
-  // Rest of date in black
-  int restX = headerX + pillW + gap;
-  int restY = (kLineH - fh) / 2;
-  paint.DrawStringAt(restX, restY, rest, &Font16, COLORED);
-
-  // Push header band
-  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, 0, kScreenW, kLineH);
-
-  // ------------------------------------------------------------
-  // 2) CLEAR gap between header and time band
-  // ------------------------------------------------------------
-  pushWhiteBands(kLineH, startY_time);
-
-  // ------------------------------------------------------------
-  // 3) TIME band
-  // ------------------------------------------------------------
-#if USE_BITMAP_CLOCK
-{
-  // --- utilities for clean, byte-aligned partial pushes ---
+  // ---------- helpers ----------
   auto clearRectWhite = [&](int x, int y, int w, int h) {
     if (w <= 0 || h <= 0) return;
     const int w8 = (w + 7) & ~7;
@@ -653,7 +569,7 @@ void drawNoAircraftScreen(time_t timestamp) {
     const int oldH = time_paint.GetHeight();
     time_paint.SetWidth(w8);
     time_paint.SetHeight(h);
-    memset(time_paint.GetImage(), 0xFF, (w8/8) * h); // white = 1s
+    memset(time_paint.GetImage(), 0xFF, (w8/8) * h);  // 1=white
     epd.Display_Partial_Not_refresh(time_paint.GetImage(), x, y, x + w, y + h);
     time_paint.SetWidth(oldW);
     time_paint.SetHeight(oldH);
@@ -662,24 +578,29 @@ void drawNoAircraftScreen(time_t timestamp) {
   auto blitGlyphMasked = [&](int x, int y, const Glyph1bpp& g) {
     if (!g.data || g.width_bits <= 0 || g.height <= 0 || (g.stride_bits & 7)) return;
     const int row_bytes = g.stride_bits / 8;
+
     const int oldW = time_paint.GetWidth();
     const int oldH = time_paint.GetHeight();
     time_paint.SetWidth(g.stride_bits);
     time_paint.SetHeight(g.height);
+
     uint8_t* dst = time_paint.GetImage();
-    memset(dst, 0xFF, row_bytes * g.height); // start white
+    memset(dst, 0xFF, row_bytes * g.height);   // white
+
     const int full_bytes = (g.width_bits / 8);
     const int rem        = (g.width_bits & 7);
     const uint8_t last_mask = rem ? (uint8_t)(0xFF << (8 - rem)) : 0xFF;
+
     for (int row = 0; row < g.height; ++row) {
       const uint8_t* s = g.data + row * row_bytes;
       uint8_t*       d = dst     + row * row_bytes;
-      for (int i = 0; i < full_bytes; ++i) d[i] &= (uint8_t)~s[i];
+      for (int i = 0; i < full_bytes; ++i) d[i] &= (uint8_t)~s[i];   // 1->black
       if (full_bytes < row_bytes) {
-        uint8_t b = s[full_bytes] & last_mask;  // keep padding white
+        uint8_t b = s[full_bytes] & last_mask;
         d[full_bytes] &= (uint8_t)~b;
       }
     }
+
     epd.Display_Partial_Not_refresh(time_paint.GetImage(), x, y,
                                     x + g.stride_bits, y + g.height);
     time_paint.SetWidth(oldW);
@@ -689,180 +610,261 @@ void drawNoAircraftScreen(time_t timestamp) {
   auto drawDigitAt = [&](int x, int bandTop, int bandH, int d) -> int {
     if (d < 0 || d > 9) return 0;
     const Glyph1bpp& g = kDigits[d];
-    const int visibleW = (int)kDigitVisibleWidthBits; // e.g. ~70
+    const int visibleW = (int)kDigitVisibleWidthBits; // e.g. 70
     const int clearW   = ((visibleW + 7) & ~7);
     clearRectWhite(x, bandTop, clearW, bandH);
     const int y = bandTop + (bandH - g.height) / 2;
     blitGlyphMasked(x, y, g);
-    return visibleW; // advance by visible width, not padded
+    return visibleW;
   };
 
-  // Draw AM/PM as Font24 text with a byte-aligned wipe (prevents zebra)
   auto drawText24At = [&](int x, int y, const char* txt) {
     if (!txt || !*txt) return;
-    const int fw24 = Font24.Width;
-    const int fh24 = Font24.Height;
-    const int w    = (int)strlen(txt) * fw24;
-    const int w8   = (w + 7) & ~7;
-
+    const int fw = Font24.Width;
+    const int fh = Font24.Height;
+    const int w  = (int)strlen(txt) * fw;
+    const int w8 = (w + 7) & ~7;
     const int oldW = time_paint.GetWidth();
     const int oldH = time_paint.GetHeight();
     time_paint.SetWidth(w8);
-    time_paint.SetHeight(fh24);
-    memset(time_paint.GetImage(), 0xFF, (w8/8) * fh24); // white
+    time_paint.SetHeight(fh);
+    memset(time_paint.GetImage(), 0xFF, (w8/8) * fh);
     time_paint.DrawStringAt(0, 0, txt, &Font24, COLORED);
-    epd.Display_Partial_Not_refresh(time_paint.GetImage(), x, y, x + w, y + fh24);
+    epd.Display_Partial_Not_refresh(time_paint.GetImage(), x, y, x + w, y + fh);
     time_paint.SetWidth(oldW);
     time_paint.SetHeight(oldH);
   };
 
-  // --- layout ---
-  const int DIG_W_VIS       = (int)kDigitVisibleWidthBits;
-  const int GAP_DIG_LOCAL   = 12;
-  const bool twoDigitHourL  = is24 ? true : (dispHour >= 10);
-  const int GAP_COLON_LCL   = 10;
-  const int GAP_COLON_RCL   = twoDigitHourL ? 10 : 0 + 10;
-  const int AMPM_GAP_LOCAL  = 10;
-  const bool hideLeadingZeroL = (!is24 && !twoDigitHourL);
+  auto DrawRoundedRectFilled = [&](Paint& p, int x, int y, int w, int h, int r, int color) {
+    if (w <= 0 || h <= 0) return;
+    if (r < 0) r = 0;
+    int rmax = std::min(w, h) / 2;
+    if (r > rmax) r = rmax;
+
+    if (w - 2*r > 0) p.DrawFilledRectangle(x + r, y, x + w - r - 1, y + h - 1, color);
+
+    int cy = y + h/2;
+    for (int dy = -r; dy <= r; ++dy) {
+      int dx = (int)floorf(sqrtf((float)r*r - (float)dy*dy));
+      int yy = cy + dy;
+      p.DrawFilledRectangle(x + r - dx, yy, x + r - 1, yy, color);           // left cap
+      p.DrawFilledRectangle(x + w - r,  yy, x + w - r + dx - 1, yy, color);  // right cap
+    }
+  };
+
+  // ---------- layout bands ----------
+  const int headerTop    = kLineH;          // one line down from the very top
+  const int headerBottom = headerTop + kLineH;
+
+  const int bandTop = (kScreenH - kTimeBandH) / 2;  // time band
+  const int bandBot = bandTop + kTimeBandH;
+
+  // Clear top margin
+  pushWhiteBands(0, headerTop);
+
+  // ----- 1) HEADER band (weekday pill + "dd month yyyy") -----
+  {
+    // Build strings (lowercase weekday & month)
+    char wday[24] = {0}, mon[24] = {0}, dayNum[4] = {0}, yearStr[8] = {0};
+    strftime(wday,   sizeof(wday), "%A", ti);
+    strftime(mon,    sizeof(mon),  "%B", ti);
+    strftime(dayNum, sizeof(dayNum), "%d", ti);
+    strftime(yearStr,sizeof(yearStr),"%Y", ti);
+    for (char* p = wday; *p; ++p) *p = (char)tolower((unsigned char)*p);
+    for (char* p = mon;  *p; ++p) *p = (char)tolower((unsigned char)*p);
+
+    // Size header paint to exactly one band (local coords!)
+    const int headerW8 = (kScreenW + 7) & ~7;
+    paint.SetWidth(headerW8);
+    paint.SetHeight(kLineH);
+    paint.Clear(UNCOLORED);
+
+    const int fw = Font16.Width;
+    const int fh = Font16.Height;
+
+    const int pillPadX = 8;
+    const int pillPadY = 4;
+    int wdayW = (int)strlen(wday) * fw;
+    int pillW = wdayW + pillPadX * 2;
+    int pillH = fh + pillPadY * 2;
+    if (pillH > kLineH - 2) pillH = kLineH - 2;
+    int pillR = pillH / 2;
+
+    const int gap = 12;
+    char rest[64];
+    snprintf(rest, sizeof(rest), "%s %s %s", dayNum, mon, yearStr);
+    int restW = (int)strlen(rest) * fw;
+
+    int totalW = pillW + gap + restW;
+    int baseY  = (kLineH - pillH) / 2;           // LOCAL Y
+    int startX = (kScreenW - totalW) / 2;
+
+    // pill
+    DrawRoundedRectFilled(paint, startX, baseY, pillW, pillH, pillR, COLORED);
+
+    // weekday in white
+    int wdayX = startX + pillPadX;
+    int wdayY = baseY + (pillH - fh) / 2;
+    paint.DrawStringAt(wdayX, wdayY, wday, &Font16, UNCOLORED);
+
+    // rest in black
+    int restX = startX + pillW + gap;
+    int restY = (kLineH - fh) / 2;               // LOCAL Y
+    paint.DrawStringAt(restX, restY, rest, &Font16, COLORED);
+
+    // push header into its screen band
+    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, headerTop, kScreenW, headerBottom);
+  }
+
+  // ----- 2) CLEAR gap between header and time band -----
+  if (bandTop > headerBottom) pushWhiteBands(headerBottom, bandTop);
+
+  // ----- 3) TIME band (bitmap digits + Font24 AM/PM) -----
+  {
+    const int DIG_W_VIS     = (int)kDigitVisibleWidthBits;
+    const bool twoDigitH    = twoDigitHour;
+    const int gapL          = GAP_COLON_L;
+    const int gapR          = GAP_COLON_R;
 
 #ifdef gDigit_colon
-  const int COLON_W = COLON_W_BMP;
-  const int COLON_H = COLON_H_BMP;
+    const int COLON_W = COLON_W_BMP;
+    const int COLON_H = COLON_H_BMP;
 #else
-  const int COLON_W = 12;
-  const int COLON_H = kTimeBandH;
+    const int COLON_W = 12;
+    const int COLON_H = kTimeBandH;
 #endif
 
-  int digitsW_local = 0;
-  if (!hideLeadingZeroL) { digitsW_local += DIG_W_VIS; digitsW_local += GAP_DIG_LOCAL; }
-  digitsW_local += DIG_W_VIS;                                  // hour ones
-  digitsW_local += GAP_COLON_LCL + COLON_W + GAP_COLON_RCL;
-  digitsW_local += DIG_W_VIS + GAP_DIG_LOCAL + DIG_W_VIS;      // minute tens + ones
+    int digitsW = 0;
+    if (!hideLeadingZero) { digitsW += DIG_W_VIS; digitsW += GAP_DIG; }
+    digitsW += DIG_W_VIS;                            // hour ones
+    digitsW += gapL + COLON_W + gapR;
+    digitsW += DIG_W_VIS + GAP_DIG + DIG_W_VIS;      // minute tens + ones
 
-  const int ampmW_local  = (!is24) ? (AMPM_GAP_LOCAL + (int)strlen(ampm) * Font24.Width) : 0;
-  const int totalW_local = digitsW_local + ampmW_local;
+    const int ampmW  = (!is24) ? (AMPM_GAP + (int)strlen(ampm) * Font24.Width) : 0;
+    const int totalW = digitsW + ampmW;
 
-  const int bandTop = (kScreenH - kTimeBandH) / 2;
-  const int startX  = (kScreenW - totalW_local) / 2;
+    const int startX = (kScreenW - totalW) / 2;
 
-  // Clear the full band hard to avoid ghost edges
-  clearRectWhite(0, bandTop, kScreenW, kTimeBandH);
+    // HARD CLEAR the whole time band
+    clearRectWhite(0, bandTop, kScreenW, kTimeBandH);
 
-  // Draw digits
-  int x = startX;
-  if (!hideLeadingZeroL) { x += drawDigitAt(x, bandTop, kTimeBandH, hT) + GAP_DIG_LOCAL; }
-  x += drawDigitAt(x, bandTop, kTimeBandH, hO) + GAP_COLON_LCL;
+    int x = startX;
 
-  // Colon
+    if (!hideLeadingZero) { x += drawDigitAt(x, bandTop, kTimeBandH, hT) + GAP_DIG; }
+    x += drawDigitAt(x, bandTop, kTimeBandH, hO) + gapL;
+
+    // Colon
 #ifdef gDigit_colon
-  {
-    const int clearW = ((COLON_W + 7) & ~7);
-    clearRectWhite(x, bandTop, clearW, kTimeBandH);
-    const Glyph1bpp colGlyph{ gDigit_colon, (uint16_t)COLON_W, (uint16_t)COLON_H,
-                              (uint16_t)((COLON_W + 7) & ~7) };
-    const int y = bandTop + (kTimeBandH - COLON_H) / 2;
-    blitGlyphMasked(x, y, colGlyph);
-  }
+    {
+      const int clearW = ((COLON_W + 7) & ~7);
+      clearRectWhite(x, bandTop, clearW, kTimeBandH);
+
+      const Glyph1bpp colGlyph{
+        gDigit_colon,
+        (uint16_t)COLON_W,
+        (uint16_t)COLON_H,
+        (uint16_t)((COLON_W + 7) & ~7)
+      };
+      const int y = bandTop + (kTimeBandH - COLON_H) / 2;
+      blitGlyphMasked(x, y, colGlyph);
+    }
 #else
-  {
-    const int clearW = ((COLON_W + 7) & ~7);
-    clearRectWhite(x, bandTop, clearW, kTimeBandH);
+    {
+      const int clearW = ((COLON_W + 7) & ~7);
+      clearRectWhite(x, bandTop, clearW, kTimeBandH);
 
-    const int oldW = time_paint.GetWidth();
-    const int oldH = time_paint.GetHeight();
-    time_paint.SetWidth(clearW);
-    time_paint.SetHeight(COLON_H);
-    time_paint.Clear(UNCOLORED);
+      const int oldW = time_paint.GetWidth();
+      const int oldH = time_paint.GetHeight();
+      time_paint.SetWidth(clearW);
+      time_paint.SetHeight(COLON_H);
+      time_paint.Clear(UNCOLORED);
 
-    int dot = 8, gap = 10;
-    drawColon(time_paint, 0, 0, COLON_H, dot, gap, COLORED);
+      int dot = 8, gap = 10;
+      drawColon(time_paint, 0, 0, COLON_H, dot, gap, COLORED);
 
-    const int y = bandTop + (kTimeBandH - COLON_H) / 2;
-    epd.Display_Partial_Not_refresh(time_paint.GetImage(), x, y, x + COLON_W, y + COLON_H);
+      const int y = bandTop + (kTimeBandH - COLON_H) / 2;
+      epd.Display_Partial_Not_refresh(time_paint.GetImage(), x, y, x + COLON_W, y + COLON_H);
 
-    time_paint.SetWidth(oldW);
-    time_paint.SetHeight(oldH);
-  }
+      time_paint.SetWidth(oldW);
+      time_paint.SetHeight(oldH);
+    }
 #endif
 
-  x += COLON_W + GAP_COLON_RCL;
-  x += drawDigitAt(x, bandTop, kTimeBandH, mT) + GAP_DIG_LOCAL;
-  x += drawDigitAt(x, bandTop, kTimeBandH, mO);
+    x += COLON_W + gapR;
+    x += drawDigitAt(x, bandTop, kTimeBandH, mT) + GAP_DIG;
+    x += drawDigitAt(x, bandTop, kTimeBandH, mO);
 
-  // AM/PM as Font24 text (no bitmap)
-  if (!is24) {
-    const int fh24  = Font24.Height;
-    const int ampmY = bandTop + (kTimeBandH - fh24) / 2;
-    drawText24At(x + AMPM_GAP_LOCAL, ampmY, ampm);
+    // AM/PM with Font24 (text, not bitmap)
+    if (!is24) {
+      const int fh24   = Font24.Height;
+      const int ampmY  = bandTop + (kTimeBandH - fh24) / 2;
+      drawText24At(x + AMPM_GAP, ampmY, ampm);
+    }
   }
+
+  // ----- 4) CLEAR gap & footer -----
+// ----- 4) CLEAR gap & footer (pill outline + lifted) -----
+{
+  // How far to lift the footer band toward the clock
+  const int LIFT_Y = 16;  // tweak to taste
+
+  // Compute the new footer band top
+  const int footerBandH = kLineH;                   // keep same band height
+  const int footerY     = kScreenH - footerBandH - LIFT_Y;
+  const int gapTop      = std::max(bandBot, 0);
+  if (footerY > gapTop) pushWhiteBands(gapTop, footerY);   // clear gap above footer band
+
+  // Message and sizing
+  const char* footer = "NO AIRCRAFT NEARBY";
+  const int fw = Font24.Width;
+  const int fh = Font24.Height;
+
+  const int textW = (int)strlen(footer) * fw;
+  const int padX  = 16;   // pill left/right padding
+  const int padY  = 6;    // pill top/bottom padding
+  const int pillW = textW + padX * 2;
+  const int pillH = fh + padY * 2;
+  const int pillR = pillH / 2;     // full "capsule" ends
+  const int stroke = 2;            // border thickness
+
+  // Prepare footer paint buffer (local coords 0..footerBandH-1)
+  const int footerW8 = (kScreenW + 7) & ~7;
+  paint.SetWidth(footerW8);
+  paint.SetHeight(footerBandH);
+  paint.Clear(UNCOLORED);  // white
+
+  // Horizontal centering
+  const int pillX = (kScreenW - pillW) / 2;
+  const int pillY = (footerBandH - pillH) / 2;
+
+  // Helper: pill stroke (outline) built from filled + inset erase
+  auto DrawRoundedRectPillStroke = [&](Paint& p, int x, int y, int w, int h, int r, int t, int color) {
+    if (w <= 0 || h <= 0) return;
+    if (t <= 0) t = 1;
+    int rmax = std::min(w, h) / 2;
+    if (r > rmax) r = rmax;
+    // draw solid
+    DrawRoundedRectFilled(p, x, y, w, h, r, color);
+    // carve interior to create stroke
+    int ix = x + t, iy = y + t, iw = w - 2*t, ih = h - 2*t, ir = std::max(0, r - t);
+    if (iw > 0 && ih > 0)
+      DrawRoundedRectFilled(p, ix, iy, iw, ih, ir, UNCOLORED);
+  };
+
+  // Draw pill outline
+  //DrawRoundedRectPillStroke(paint, pillX, pillY, pillW, pillH, pillR, stroke, COLORED);
+
+  // Draw centered text in black
+  const int textX = pillX + padX;
+  const int textY = pillY + (pillH - fh) / 2;
+  paint.DrawStringAt(textX, textY, footer, &Font24, COLORED);
+
+  // Push the footer band at its lifted Y
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, footerY, kScreenW, footerY + footerBandH);
 }
-#elif USE_FONT24_CLOCK
-  // Build time string with optional leading-zero hide in 12h mode
-  char timeStr[6] = "--:--";
-  if (is24) {
-    snprintf(timeStr, sizeof(timeStr), "%02d:%02d", dispHour, min);
-  } else {
-    if (dispHour >= 10) snprintf(timeStr, sizeof(timeStr), "%02d:%02d", dispHour, min);
-    else                snprintf(timeStr, sizeof(timeStr),  "%1d:%02d",  dispHour, min);
-  }
 
-  const int fw24 = Font24.Width;
-  const int fh24 = Font24.Height;
-  const int fw16 = Font16.Width;
-  const int fh16 = Font16.Height;
 
-  const bool showAMPM = !is24;
-  const int ampmW = showAMPM ? (2 * fw24) : 0;   // AM/PM in Font24 here
-  const int gapAMPM = showAMPM ? 10 : 0;
-
-  const int timeW = (int)strlen(timeStr) * fw24;
-  const int totalW2 = timeW + gapAMPM + ampmW;
-
-  int x2 = (kScreenW - totalW2) / 2;
-  int y2 = (kTimeBandH - fh24) / 2;
-
-  // Wipe band, then draw to avoid artifacts
-  time_paint.Clear(UNCOLORED);
-  time_paint.DrawStringAt(x2, y2, timeStr, &Font24, COLORED);
-  x2 += timeW;
-
-  if (showAMPM) {
-    time_paint.DrawStringAt(x2 + gapAMPM, y2, ampm, &Font24, COLORED);
-  }
-
-  epd.Display_Partial_Not_refresh(time_paint.GetImage(), 0, startY_time, kScreenW, startY_time + kTimeBandH);
-
-#else
-  // Fallback 7-seg
-  int x3 = startX_time;
-  if (!hideLeadingZero) { draw7SegDigit(time_paint, x3, 0, D_W, D_H, SEG_T, COLORED, hT); x3 += D_W + GAP_DIG; }
-  draw7SegDigit(time_paint, x3, 0, D_W, D_H, SEG_T, COLORED, hO); x3 += D_W + GAP_COLON_L;
-  drawColon(time_paint, x3 + (COLON_W - SEG_T)/2, 0, D_H, SEG_T/2 + 2, 10, COLORED); x3 += COLON_W + GAP_COLON_R;
-  draw7SegDigit(time_paint, x3, 0, D_W, D_H, SEG_T, COLORED, mT); x3 += D_W + GAP_DIG;
-  draw7SegDigit(time_paint, x3, 0, D_W, D_H, SEG_T, COLORED, mO); x3 += D_W;
-
-  if (!is24) {
-    int ampmY = (D_H - Font16.Height) / 2;
-    time_paint.DrawStringAt(x3 + AMPM_GAP, ampmY, ampm, &Font16, COLORED);
-  }
-  epd.Display_Partial_Not_refresh(time_paint.GetImage(), 0, startY_time, kScreenW, startY_time + D_H);
-#endif
-
-  // ------------------------------------------------------------
-  // 4) CLEAR gap & footer
-  // ------------------------------------------------------------
-  int footerY  = kScreenH - kLineH;
-  pushWhiteBands(startY_time + D_H, footerY);
-
-  const char* footer = "no aircraft nearby";
-  paint.Clear(UNCOLORED);
-  int footerX = (kScreenW - (int)strlen(footer) * Font16.Width) / 2;
-  paint.DrawStringAt(footerX, 5, footer, &Font16, COLORED);
-  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, footerY, kScreenW, footerY + kLineH);
-
-  // ------------------------------------------------------------
   // 5) refresh
-  // ------------------------------------------------------------
   epd.TurnOnDisplay_Partial();
 
   firstDraw  = false;
