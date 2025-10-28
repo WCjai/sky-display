@@ -1009,10 +1009,63 @@ static void BlitBitmapMono16(int x, int y, int w, int h, const uint8_t* bitsPROG
   paint.SetHeight(oh);
 }
 
+// Tomohiko Sakamoto’s algorithm: 0=Sun..6=Sat
+// 0=Sun..6=Sat (Tomohiko Sakamoto’s algorithm)
+static int dowFromYMD(int y, int m, int d) {
+  static int t[] = {0,3,2,5,0,3,5,1,4,6,2,4};
+  if (m < 3) y -= 1;
+  return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7; // 0..6
+}
+
+// Draw a filled rounded pill (height ~ font height)
+// Seamless filled "pill" (rounded rectangle) — draws horizontal spans across the full width.
+// No center seam, no underlines.
+// x,y: top-left; w: width; h: height (h>=2), color: COLORED or UNCOLORED
+static void DrawFilledPill(Paint& p, int x, int y, int w, int h, int color) {
+  if (w <= 0 || h <= 1) return;
+  int r = h / 2;                       // radius from height
+  if (2 * r > h) r = h / 2;
+  if (2 * r > w) r = w / 2;            // clamp for very small widths
+
+  int left   = x;
+  int right  = x + w - 1;
+  int top    = y;
+  int bottom = y + h - 1;
+
+  // 1) Middle rectangle (no arcs)
+  if (right - left + 1 > 0 && r > 0) {
+    p.DrawFilledRectangle(left + r, top, right - r, bottom, color);
+  } else {
+    // If w is too small for side arcs, just fill the whole box
+    p.DrawFilledRectangle(left, top, right, bottom, color);
+    return;
+  }
+
+  // 2) Left & right semicircles (horizontal spans — no seam!)
+  //    We draw each scanline from the arc edge all the way across to the opposite arc edge.
+  //    That guarantees a single solid fill per row.
+  for (int dy = -r; dy <= r; ++dy) {
+    int yy = y + r + dy;                          // current scanline
+    int dx = 0;
+    // If r*r - dy*dy is negative due to integer rounding, clamp to 0
+    int rr_minus_dy2 = r*r - dy*dy;
+    if (rr_minus_dy2 > 0) {
+      // integer sqrt (fast + exact enough for small r)
+      dx = (int)floorf(sqrtf((float)rr_minus_dy2));
+    }
+    int xl = left  + r - dx;                      // left arc x
+    int xr = right - r + dx;                      // right arc x
+    if (xl > xr) std::swap(xl, xr);
+    p.DrawFilledRectangle(xl, yy, xr, yy, color); // one continuous span — no center join
+  }
+}
+
+
+
 // -------- LIVE (batched partial, single refresh) --------
 void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFromAPI) {
   if (sMode == HOLD_MODE) return;
-  ensurePartialPrimed(); // <— make sure panel is in partial mode
+  ensurePartialPrimed();
 
   RowView* rows = s_rows_live;
   int active = snapshotActiveRows(rows, MAX_CACHE_SIZE);
@@ -1031,34 +1084,20 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
   const int maxShown = 5;
   const int maxLines = 1 + (maxShown * 2);
 
-  // line cosmetics
+  // cosmetics
   const int kSepThickness = 1;
   const int kDotThickness = 1;
   const int kDotOn  = 4;
   const int kDotOff = 3;
 
   auto drawSolidHLine = [&](int y0, int thickness) {
-    for (int t = 0; t < thickness; ++t) {
+    for (int t = 0; t < thickness; ++t)
       paint.DrawFilledRectangle(0, y0 + t, kScreenW - 1, y0 + t, COLORED);
-    }
-  };
-  auto drawDottedHLine = [&](int y0, int thickness, int onLen, int offLen) {
-    for (int t = 0; t < thickness; ++t) {
-      for (int x = 0; x < kScreenW; x += (onLen + offLen)) {
-        int x1 = x;
-        int x2 = x + onLen - 1;
-        if (x1 >= kScreenW) break;
-        if (x2 >= kScreenW) x2 = kScreenW - 1;
-        paint.DrawFilledRectangle(x1, y0 + t, x2, y0 + t, COLORED);
-      }
-    }
   };
   auto drawDottedVLine = [&](int x0, int thickness, int onLen, int offLen) {
     for (int t = 0; t < thickness; ++t) {
       for (int y = 0; y < kLineH; y += (onLen + offLen)) {
-        int y1 = y;
-        int y2 = y + onLen - 1;
-        if (y1 >= kLineH) break;
+        int y1 = y, y2 = y + onLen - 1;
         if (y2 >= kLineH) y2 = kLineH - 1;
         paint.DrawFilledRectangle(x0 + t, y1, x0 + t, y2, COLORED);
       }
@@ -1068,128 +1107,160 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
   int y = 0;
   int linesUsed = 0;
 
-  // =========================
-  // Icon + label HEADER (🗓 DD Mon  |  ⏰ HH:MM:SS [AM/PM]  |  ✈ TOTAL n)
-  // =========================
-  {
-    const char* src = (timeStr && timeStr[0]) ? timeStr : sLastTimeStr;
+// =========================
+// Header ( [DoW pill] DD Mon  |  ⏰ HH:MM [AM/PM]  |  ✈ AVL n )
+// =========================
+{
+  const char* src = (timeStr && timeStr[0]) ? timeStr : sLastTimeStr;
 
-    // Parse: YYYY-MM-DD | HH:MM:SS [AM/PM]
-    char yy[5], mm[3], dd[3], hhmmss[9], ampm[3];
-    bool haveAMPM = false;
-    ParseHeaderParts(src, yy, mm, dd, hhmmss, haveAMPM, ampm);
+  // Parse: YYYY-MM-DD | HH:MM:SS [AM/PM]
+  char yy[5], mm[3], dd[3], hhmmss[9], ampm[3];
+  bool haveAMPM = false;
+  ParseHeaderParts(src, yy, mm, dd, hhmmss, haveAMPM, ampm);
 
-    // Month short name
-    static const char* kMon[13] = {"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-    int mnum = 0;
-    if (mm[0] && mm[1]) mnum = (mm[0]-'0')*10 + (mm[1]-'0');
-    const char* mon3 = (mnum>=1 && mnum<=12) ? kMon[mnum] : "--";
-
-    char dateLabel[16];
-    snprintf(dateLabel, sizeof(dateLabel), "%s %s", dd[0] ? dd : "--", mon3);
-
-    int totalToShow = (totalAircraftFromAPI > 0) ? totalAircraftFromAPI : sTotalActive;
-    char totalLabel[24];
-    snprintf(totalLabel, sizeof(totalLabel), "AVL %d", totalToShow);
-
-    const int radius = 8;
-    const int padX   = 6;
-    //const int yText  = 5;                  // baseline for Font16
-    const int iconY  = 5;                  // top of 16px icon
-    const int iconW  = 16, iconH = 16;
-    const int gapIconText = 6;
-    const int fw = Font16.Width;
-    int yText = iconY + ((iconH - Font16.Height) / 2) + HEADER_TEXT_Y_ADJ;
-    // Pre-calc text widths
-    int dateW  = (int)strlen(dateLabel) * fw;
-    int timeW  = 8 * fw + (haveAMPM ? (1*fw + 2*fw) : 0);  // "HH:MM:SS[ AM/PM]"
-    int totalW = (int)strlen(totalLabel) * fw;
-
-    // 1) Draw the whole band (outline + all text) into paint
-    paint.Clear(UNCOLORED);
-    DrawRoundedRectOutline(paint, 2, 1, kScreenW - 4, kLineH - 2, radius, 2, COLORED);
-
-    // LEFT text (reserve icon space)
-    int xL = padX + 2;
-    int xL_text = xL + iconW + gapIconText;
-    paint.DrawStringAt(xL_text, yText, dateLabel, &Font16, COLORED);
-
-    // CENTER text
-    int centerBlockW = iconW + gapIconText + timeW;
-    int xC = (kScreenW - centerBlockW) / 2;
-    int xC_text = xC + iconW + gapIconText;
-    paint.DrawStringAt(xC_text, yText, hhmmss, &Font16, COLORED);
-    if (haveAMPM) {
-      paint.DrawStringAt(xC_text + 8*fw + fw, yText, ampm, &Font16, COLORED);
-    }
-
-    // RIGHT text
-    int rightBlockW = iconW + gapIconText + totalW;
-    int xR = kScreenW - padX - 2 - rightBlockW;
-    int xR_text = xR + iconW + gapIconText;
-    paint.DrawStringAt(xR_text, yText, totalLabel, &Font16, COLORED);
-
-    // Push the full header band once
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, 0, kScreenW, kLineH);
-
-    // 2) Now overlay the icons so they are not covered by the band
-    BlitBitmapMono16(xL, iconY, iconW, iconH, ICON_CAL_16); // 🗓
-    BlitBitmapMono16(xC, iconY, iconW, iconH, ICON_CLK_16); // ⏰
-    BlitBitmapMono16(xR, iconY, iconW, iconH, ICON_PLN_16); // ✈
-
-    // advance the outer y (IMPORTANT: no 'int' here—don’t shadow it)
-    y = kLineH;
-    linesUsed++;
+  // Use HH:MM only
+  char hhmm[6] = "--:--";
+  if (isdigit((unsigned char)hhmmss[0]) && isdigit((unsigned char)hhmmss[1]) &&
+      hhmmss[2] == ':' &&
+      isdigit((unsigned char)hhmmss[3]) && isdigit((unsigned char)hhmmss[4])) {
+    memcpy(hhmm, hhmmss, 5); hhmm[5] = '\0';
   }
+
+  // Month / weekday
+  static const char* kMon[13] = {"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+  int mnum = (mm[0] && mm[1]) ? ((mm[0]-'0')*10 + (mm[1]-'0')) : 0;
+  const char* mon3 = (mnum>=1 && mnum<=12) ? kMon[mnum] : "--";
+
+  static const char* kDOW2[7] = {"Su","Mo","Tu","We","Th","Fr","Sa"};
+  int yN = atoi(yy), mN = mnum, dN = atoi(dd);
+  int dow = (yN>0 && mN>=1 && mN<=12 && dN>=1 && dN<=31) ? dowFromYMD(yN, mN, dN) : 0;
+  const char* dow2 = kDOW2[(dow+7)%7];
+
+  char dateLabel[16];
+  snprintf(dateLabel, sizeof(dateLabel), "%s %s", dd[0] ? dd : "--", mon3);
+
+  int totalToShow = (totalAircraftFromAPI > 0) ? totalAircraftFromAPI : sTotalActive;
+  char totalLabel[24]; snprintf(totalLabel, sizeof(totalLabel), "AVL %d", totalToShow);
+
+  // Capsule + “safe box” that keeps content off the outline
+  const int OUT_X = 2, OUT_Y = 1;                 // outline origin
+  const int OUT_W = kScreenW - 4, OUT_H = kLineH - 2;
+  const int STROKE = 2;                            // we draw 2px outline
+  const int MARGIN = 2;                            // inner breathing room
+
+  const int SAFE_X = OUT_X + STROKE + MARGIN;
+  const int SAFE_Y = OUT_Y + STROKE + MARGIN;
+  const int SAFE_W = OUT_W - 2*(STROKE + MARGIN);
+  const int SAFE_H = OUT_H - 2*(STROKE + MARGIN);
+
+  // Center/right icon metrics
+  const int iconW = 16, iconH = 16;
+  const int gapIconText = 6;
+
+  // A single baseline for all header text (vertically centered in SAFE box)
+  int yText = SAFE_Y + (SAFE_H - Font16.Height)/2 + 2;
+
+  // Draw capsule outline
+  paint.Clear(UNCOLORED);
+  DrawRoundedRectOutline(paint, OUT_X, OUT_Y, OUT_W, OUT_H, 8, STROKE, COLORED);
+
+  // -------- LEFT: [DoW pill] + gap + "DD Mon"  --------
+  const int pillPadX = 6;
+  const int pillPadY = 2;
+
+  int pillTextW = 2 * Font16.Width;                // "Mo" etc.
+  int pillH     = Font16.Height + 2*pillPadY;
+  if (pillH > SAFE_H) pillH = SAFE_H;              // never touch the capsule
+  int pillW     = pillTextW + 2*pillPadX;
+
+  // Pill centered vertically in SAFE box (so it does not touch borders)
+  int pillX = SAFE_X;                               // snug to the safe left
+  int pillY = SAFE_Y + (SAFE_H - pillH)/2;
+
+  DrawFilledPill(paint, pillX, pillY, pillW, pillH, COLORED);
+  int pillTextY = pillY + (pillH - Font16.Height)/2 + 2;
+  paint.DrawStringAt(pillX + pillPadX, pillTextY, dow2, &Font16, UNCOLORED);
+
+  const int gapPillToDate = 8;
+  int xDate = pillX + pillW + gapPillToDate;
+  paint.DrawStringAt(xDate, yText, dateLabel, &Font16, COLORED);
+
+  // -------- CENTER: ⏰ + HH:MM [AM/PM] (as one centered block in SAFE) --------
+  int timeW = (int)strlen(hhmm) * Font16.Width + (haveAMPM ? (Font16.Width + 2*Font16.Width) : 0);
+
+  // block width: icon + gap + time text (incl. AM/PM if present)
+  int centerBlockW = iconW + gapIconText + ((int)strlen(hhmm) * Font16.Width) + (haveAMPM ? (Font16.Width + 2*Font16.Width) : 0);
+  int xC = SAFE_X + (SAFE_W - centerBlockW)/2;
+  int xC_text = xC + iconW + gapIconText;
+
+  paint.DrawStringAt(xC_text, yText, hhmm, &Font16, COLORED);
+  if (haveAMPM) {
+    paint.DrawStringAt(xC_text + 5*Font16.Width, yText, " ",  &Font16, COLORED);
+    paint.DrawStringAt(xC_text + 6*Font16.Width, yText, ampm, &Font16, COLORED);
+  }
+
+  // -------- RIGHT: ✈ + "AVL n" --------
+  int totalW = (int)strlen(totalLabel) * Font16.Width;
+  int rightBlockW = iconW + gapIconText + totalW;
+  int xR = SAFE_X + SAFE_W - rightBlockW;
+  int xR_text = xR + iconW + gapIconText;
+  paint.DrawStringAt(xR_text, yText, totalLabel, &Font16, COLORED);
+
+  // Push the header band
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, 0, kScreenW, kLineH);
+
+  // Overlay icons (center/right only)
+  int iconY = SAFE_Y + (SAFE_H - iconH)/2;
+  BlitBitmapMono16(xC, iconY, iconW, iconH, ICON_CLK_16);
+  BlitBitmapMono16(xR, iconY, iconW, iconH, ICON_PLN_16);
+
+  // advance rows start
+  y = kLineH;
+  linesUsed++;
+}
 
   // ---- Rows ----
   int shown = 0;
   for (int i = 0; i < active && shown < maxShown; i++) {
     const auto& r = rows[i];
 
-    // Callsign (fallback to ICAO) — fixed 7 chars
+    // Callsign or ICAO (fixed 7 chars)
     char callsign[9];
     if (r.callsign[0] == '\0') { strncpy(callsign, r.icao24, sizeof(callsign)); callsign[sizeof(callsign)-1] = '\0'; }
     else                       { strncpy(callsign, r.callsign, sizeof(callsign)); callsign[sizeof(callsign)-1] = '\0'; }
     char csPadded[8]; snprintf(csPadded, sizeof(csPadded), "%-7.7s", callsign);
 
-    // Distance — fixed width "xxxx.xkm"
-    float dist = r.distance;
-    char distStr[10];
-    snprintf(distStr, sizeof(distStr), "%4.1fkm", dist);
+    // Distance "xxxx.xkm"
+    char distStr[10]; snprintf(distStr, sizeof(distStr), "%4.1fkm", r.distance);
 
-    // Direction — "DDDXY"
+    // Direction "DDDXY"
     int  bInt = (int)r.bearing; if (bInt < 0) bInt += 360; if (bInt > 359) bInt -= 360;
     char brg[4];  snprintf(brg, sizeof(brg), "%3d", bInt);
     char cd[2];   compass2(r.bearing, cd);
     char dirStr[6]; snprintf(dirStr, sizeof(dirStr), "%s%s", brg, cd);
 
-    // --- Model band ---
+    // Model band
     paint.Clear(UNCOLORED);
     if (shown > 0) drawSolidHLine(0, kSepThickness);
-
     paint.DrawStringAt(5, 5, r.model, &Font16, COLORED);
 
+    // dotted underline
     for (int t = 0; t < kDotThickness; ++t) {
       for (int x = 0; x < kScreenW; x += (kDotOn + kDotOff)) {
-        int x1 = x;
-        int x2 = x + kDotOn - 1;
-        if (x1 >= kScreenW) break;
-        if (x2 >= kScreenW) x2 = kScreenW - 1;
+        int x1 = x, x2 = x + kDotOn - 1; if (x2 >= kScreenW) x2 = kScreenW - 1;
         paint.DrawFilledRectangle(x1, kLineH - 1 + t, x2, kLineH - 1 + t, COLORED);
       }
     }
     epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
     y += kLineH; linesUsed++;
 
-    // --- Info band with dotted verticals ---
+    // Info band
     paint.Clear(UNCOLORED);
 
     const int fw = Font16.Width;
     const int left = 5;
     const int pad  = 4;
     const int spaceAfterDot = fw;
-
     const int col1ch = 7;   // callsign
     const int col2ch = 7;   // distance
     const int col3ch = 5;   // direction
@@ -1202,11 +1273,10 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
     int x3_line = x3_text + col3ch * fw + pad;
     int x4_text = x3_line + spaceAfterDot;
 
-    // Country fits remaining width
+    // Country fitted into remaining space
     const int rightPad = 5;
     int maxCountryPx = kScreenW - rightPad - x4_text;
     int maxCountryCh = (maxCountryPx > 0) ? (maxCountryPx / fw) : 0;
-
     char countryBuf[32];
     shortenCountryForWidth(r.country, countryBuf, sizeof(countryBuf), maxCountryCh);
 
@@ -1215,20 +1285,9 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
     paint.DrawStringAt(x3_text, 5, dirStr,     &Font16, COLORED);
     paint.DrawStringAt(x4_text, 5, countryBuf, &Font16, COLORED);
 
-    auto drawDottedVLine2 = [&](int x0, int thickness, int onLen, int offLen) {
-      for (int t = 0; t < thickness; ++t) {
-        for (int yy = 0; yy < kLineH; yy += (onLen + offLen)) {
-          int y1 = yy;
-          int y2 = yy + onLen - 1;
-          if (y1 >= kLineH) break;
-          if (y2 >= kLineH) y2 = kLineH - 1;
-          paint.DrawFilledRectangle(x0 + t, y1, x0 + t, y2, COLORED);
-        }
-      }
-    };
-    if (x1_line < kScreenW) drawDottedVLine2(x1_line, kDotThickness, kDotOn, kDotOff);
-    if (x2_line < kScreenW) drawDottedVLine2(x2_line, kDotThickness, kDotOn, kDotOff);
-    if (x3_line < kScreenW) drawDottedVLine2(x3_line, kDotThickness, kDotOn, kDotOff);
+    if (x1_line < kScreenW) drawDottedVLine(x1_line, kDotThickness, kDotOn, kDotOff);
+    if (x2_line < kScreenW) drawDottedVLine(x2_line, kDotThickness, kDotOn, kDotOff);
+    if (x3_line < kScreenW) drawDottedVLine(x3_line, kDotThickness, kDotOn, kDotOff);
 
     for (int t = 0; t < kSepThickness; ++t)
       paint.DrawFilledRectangle(0, kLineH - kSepThickness + t, kScreenW - 1, kLineH - kSepThickness + t, COLORED);
@@ -1469,7 +1528,7 @@ DisplayMode getDisplayMode() { return sMode; }
 
 void setDisplayMode(DisplayMode m) {
   // Guard: don’t enter HOLD when <6 aircraft
-  if (m == HOLD_MODE && getActiveCount() < 6) return;
+  if (m == HOLD_MODE && getActiveCount() < 2) return;
 
   if (sMode == m) {
     if (m == HOLD_MODE) {
@@ -1510,388 +1569,3 @@ void pageDown() {
 
 
 
-// Draw a one-shot dummy "live" screen at boot for debugging layout.
-// Uses the same 27px rows and the icon+label header as your live page.
-void debugShowDummyLiveBoot() {
-#if DEBUG_BOOT_DUMMY_LIVE
-  ScopedDispLock _;
-
-  ensurePartialPrimed();        // make sure partial path is ready
-
-  // ---------- Dummy time & counts ----------
-  // Format like your real string: "YYYY-MM-DD | HH:MM:SS"
-  const char* dummyTimeStr = "2025-10-16 | 14:22:03";
-  int totalFromAPI = 23;        // shows in the right badge as "AVL 23"
-
-  // ---------- Parse time (reuse your live header logic) ----------
-  char yy[5], mm[3], dd[3], hhmmss[9], ampm[3];
-  bool haveAMPM = false;
-  ParseHeaderParts(dummyTimeStr, yy, mm, dd, hhmmss, haveAMPM, ampm);
-
-  static const char* kMon[13] = {"","Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
-  int mnum = 0;
-  if (mm[0] && mm[1]) mnum = (mm[0]-'0')*10 + (mm[1]-'0');
-  const char* mon3 = (mnum>=1 && mnum<=12) ? kMon[mnum] : "--";
-
-  char dateLabel[16];
-  snprintf(dateLabel, sizeof(dateLabel), "%s %s", dd[0] ? dd : "--", mon3);
-
-  char totalLabel[24];
-  snprintf(totalLabel, sizeof(totalLabel), "AVL %d", totalFromAPI);
-
-  // ---------- Header metrics ----------
-  const int radius = 8;
-  const int padX   = 6;
-  const int iconY  = 5;
-  const int iconW  = 16, iconH = 16;
-  const int gapIconText = 6;
-  const int fw = Font16.Width;
-
-  // Align label with icon + 1px nudge
-  const int HEADER_TEXT_Y_ADJ = 2;
-  int yText = iconY + ((iconH - Font16.Height) / 2) + HEADER_TEXT_Y_ADJ;
-
-  // Pre-calc widths
-  int dateW  = (int)strlen(dateLabel) * fw;
-  int timeW  = 8 * fw + (haveAMPM ? (1*fw + 2*fw) : 0);
-  int totalW = (int)strlen(totalLabel) * fw;
-
-  // ---------- Draw header band into paint ----------
-  paint.Clear(UNCOLORED);
-  DrawRoundedRectOutline(paint, 2, 1, kScreenW - 4, kLineH - 2, radius, 2, COLORED);
-
-  // LEFT
-  int xL = padX + 2;
-  int xL_text = xL + iconW + gapIconText;
-  paint.DrawStringAt(xL_text, yText, dateLabel, &Font16, COLORED);
-
-  // CENTER
-  int centerBlockW = iconW + gapIconText + timeW;
-  int xC = (kScreenW - centerBlockW) / 2;
-  int xC_text = xC + iconW + gapIconText;
-  paint.DrawStringAt(xC_text, yText, hhmmss, &Font16, COLORED);
-  if (haveAMPM) {
-    paint.DrawStringAt(xC_text + 8*fw + fw, yText, ampm, &Font16, COLORED);
-  }
-
-  // RIGHT
-  int rightBlockW = iconW + gapIconText + totalW;
-  int xR = kScreenW - padX - 2 - rightBlockW;
-  int xR_text = xR + iconW + gapIconText;
-  paint.DrawStringAt(xR_text, yText, totalLabel, &Font16, COLORED);
-
-  // Push header band (once)
-  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, 0, kScreenW, kLineH);
-
-  // Overlay icons (so outline/text doesn't overwrite them)
-  BlitBitmapMono16(xL, iconY, iconW, iconH, ICON_CAL_16); // 🗓
-  BlitBitmapMono16(xC, iconY, iconW, iconH, ICON_CLK_16); // ⏰
-  BlitBitmapMono16(xR, iconY, iconW, iconH, ICON_PLN_16); // ✈
-
-  int y = kLineH;
-
-  // ---------- Dummy rows (5 aircraft) ----------
-  struct DummyRow { const char* model; const char* cs; float dist; int brg; const char* country; };
-  DummyRow demo[5] = {
-    {"Airbus A320-214", "UAE123",  12.7f,  46, "United Arab Emirates"},
-    {"Boeing 777-31H",  "QTR9",    85.4f, 192, "Qatar"},
-    {"Cessna 172S",     "—",        6.3f, 271, "United States"},
-    {"Boeing 737-8KN",  "FZ842",   42.1f, 124, "United Kingdom"},
-    {"A350-941",        "AFR66",   99.9f,  15, "France"},
-  };
-
-  auto drawDottedHLine = [&](int y0, int thickness, int onLen, int offLen){
-    for (int t = 0; t < thickness; ++t) {
-      for (int x = 0; x < kScreenW; x += (onLen + offLen)) {
-        int x1 = x, x2 = x + onLen - 1;
-        if (x2 >= kScreenW) x2 = kScreenW - 1;
-        paint.DrawFilledRectangle(x1, y0 + t, x2, y0 + t, COLORED);
-      }
-    }
-  };
-  auto drawDottedVLine = [&](int x0, int thickness, int onLen, int offLen){
-    for (int t = 0; t < thickness; ++t) {
-      for (int yy = 0; yy < kLineH; yy += (onLen + offLen)) {
-        int y1 = yy, y2 = yy + onLen - 1;
-        if (y2 >= kLineH) y2 = kLineH - 1;
-        paint.DrawFilledRectangle(x0 + t, y1, x0 + t, y2, COLORED);
-      }
-    }
-  };
-
-  const int kSepThickness = 1;
-  const int kDotThickness = 1;
-  const int kDotOn  = 4;
-  const int kDotOff = 3;
-
-  const int left = 5;
-  const int pad  = 4;           // gap before dotted line
-  const int spaceAfterDot = fw; // one "space"
-
-  const int col1ch = 7;   // callsign width
-  const int col2ch = 7;   // distance width
-  const int col3ch = 5;   // direction width
-
-  int x1_text = left;
-  int x1_line = x1_text + col1ch * fw + pad;
-  int x2_text = x1_line + spaceAfterDot;
-  int x2_line = x2_text + col2ch * fw + pad;
-  int x3_text = x2_line + spaceAfterDot;
-  int x3_line = x3_text + col3ch * fw + pad;
-  int x4_text = x3_line + spaceAfterDot; // country starts here
-
-  for (int i = 0; i < 5; ++i) {
-    // --- Model band ---
-    paint.Clear(UNCOLORED);
-    if (i > 0) {
-      paint.DrawFilledRectangle(0, 0, kScreenW - 1, 0, COLORED); // top border
-    }
-    paint.DrawStringAt(left, 5, demo[i].model, &Font16, COLORED);
-    drawDottedHLine(kLineH - 1, kDotThickness, kDotOn, kDotOff);
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
-    y += kLineH;
-
-    // --- Info band ---
-    paint.Clear(UNCOLORED);
-
-    // callsign (fallback to icao style demo)
-    char csPadded[8];
-    const char* cs = (demo[i].cs && demo[i].cs[0] && demo[i].cs[0] != 0xE2) ? demo[i].cs : "ABC123";
-    snprintf(csPadded, sizeof(csPadded), "%-7.7s", cs);
-
-    // distance
-    char distStr[10];
-    snprintf(distStr, sizeof(distStr), "%4.1fkm", demo[i].dist);
-
-    // direction "DDDcc"
-    int bInt = demo[i].brg % 360;
-    char brg[4]; snprintf(brg, sizeof(brg), "%3d", bInt);
-    char cd[3];
-    {  // same compass2() but inline
-      static const char table[8][3] = {"N ","NE","E ","SE","S ","SW","W ","NW"};
-      int idx = (int)lroundf((float)bInt / 45.0f); if (idx == 8) idx = 0;
-      cd[0] = table[idx][0]; cd[1] = table[idx][1]; cd[2] = '\0';
-    }
-    char dirStr[8]; snprintf(dirStr, sizeof(dirStr), "%s%s", brg, cd);
-
-    // country fit
-    const int rightPad = 5;
-    int maxCountryPx = kScreenW - rightPad - x4_text;
-    int maxCountryCh = (maxCountryPx > 0) ? (maxCountryPx / fw) : 0;
-
-    char countryBuf[32];
-    shortenCountryForWidth(demo[i].country, countryBuf, sizeof(countryBuf), maxCountryCh);
-
-    // dotted verticals
-    if (x1_line < kScreenW) drawDottedVLine(x1_line, kDotThickness, kDotOn, kDotOff);
-    if (x2_line < kScreenW) drawDottedVLine(x2_line, kDotThickness, kDotOn, kDotOff);
-    if (x3_line < kScreenW) drawDottedVLine(x3_line, kDotThickness, kDotOn, kDotOff);
-
-    // text
-    paint.DrawStringAt(x1_text, 5, csPadded,   &Font16, COLORED);
-    paint.DrawStringAt(x2_text, 5, distStr,    &Font16, COLORED);
-    paint.DrawStringAt(x3_text, 5, dirStr,     &Font16, COLORED);
-    paint.DrawStringAt(x4_text, 5, countryBuf, &Font16, COLORED);
-
-    // bottom border
-    paint.DrawFilledRectangle(0, kLineH - 1, kScreenW - 1, kLineH - 1, COLORED);
-
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
-    y += kLineH;
-  }
-
-  // clear the rest (if any)
-  while (y < kScreenH) {
-    int y2 = y + kLineH; if (y2 > kScreenH) y2 = kScreenH;
-    paint.Clear(UNCOLORED);
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y2);
-    y = y2;
-  }
-
-  epd.TurnOnDisplay_Partial();
-
-#endif // DEBUG_BOOT_DUMMY_LIVE
-}
-
-void debugShowDummyHoldBoot() {
-#if DEBUG_BOOT_DUMMY_HOLD
-  ScopedDispLock _;
-
-  ensurePartialPrimed();
-
-  // ------- Dummy state -------
-  const int dummyPageCur = 2;
-  const int dummyPageTot = 5;
-  const int dummySaved   = 23;
-  const char* hhmm = "14:22";
-
-  // ------- Header metrics (match live style) -------
-  const int radius = 8;
-  const int padX   = 6;
-  const int iconW  = 16, iconH = 16;
-  const int iconY  = 5;                         // visually balanced in 27px band
-  const int fw     = Font16.Width;
-  const int gapIconText = 6;                    // gap between icon and label
-
-  // 1px label nudge to align with icon baseline
-  const int HEADER_TEXT_Y_ADJ = 2;
-  const int yText = iconY + ((iconH - Font16.Height) / 2) + HEADER_TEXT_Y_ADJ;
-
-  // Labels (no extra space before text — icon and word touch visually)
-  const char* leftLabel   = "HOLD";
-  char centerLabel[24]; snprintf(centerLabel, sizeof(centerLabel), "%s  ", hhmm);
-  char pageLabel[12];   snprintf(pageLabel,   sizeof(pageLabel),  "%d/%d", dummyPageCur, dummyPageTot);
-  char rightLabel[12];  snprintf(rightLabel,  sizeof(rightLabel), "%d", dummySaved);
-
-  // Pre-calc widths
-  int leftW    = (int)strlen(leftLabel)   * fw;
-  int centerW  = (int)strlen(centerLabel) * fw;
-  int pageW    = (int)strlen(pageLabel)   * fw;
-  int rightW   = (int)strlen(rightLabel)  * fw;
-
-  // We'll place 4 blocks: [⏸ + HOLD], [⏰ + HH:MM|], [📄 + X/Y], [💾 + N]
-  // The center-two blocks are placed as one combined center block for easy centering.
-  int centerBlockW = (iconW + gapIconText + centerW) +  // time
-                     fw +                                 // one normal "space" between time and page group looks balanced
-                     (iconW + gapIconText + pageW);      // page
-
-  // ------- Draw header band (outline + text first) -------
-  paint.Clear(UNCOLORED);
-  DrawRoundedRectOutline(paint, 2, 1, kScreenW - 4, kLineH - 2, radius, 2, COLORED);
-
-  // LEFT: ⏸HOLD  (icon + label with no extra space before label)
-  int xL_icon = padX + 2;
-  int xL_text = xL_icon + iconW + gapIconText;
-  paint.DrawStringAt(xL_text, yText, leftLabel, &Font16, COLORED);
-
-  // CENTER: ⏰HH:MM|  +  📄X/Y  (tightly centered as a single block)
-  int xC_block = (kScreenW - centerBlockW) / 2;
-
-  int xC1_icon = xC_block;
-  int xC1_text = xC1_icon + iconW + gapIconText;
-  paint.DrawStringAt(xC1_text, yText, centerLabel, &Font16, COLORED);
-
-  int xC2_icon = xC1_text + centerW + fw;                  // small gap before second center group
-  int xC2_text = xC2_icon + iconW + gapIconText;
-  paint.DrawStringAt(xC2_text, yText, pageLabel, &Font16, COLORED);
-
-  // RIGHT: 💾N
-  int rightBlockW = iconW + gapIconText + rightW;
-  int xR_icon = kScreenW - padX - 2 - rightBlockW;
-  int xR_text = xR_icon + iconW + gapIconText;
-  paint.DrawStringAt(xR_text, yText, rightLabel, &Font16, COLORED);
-
-  // Push the header band once
-  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, 0, kScreenW, kLineH);
-
-  // Overlay icons after text so they’re crisp
-  BlitBitmapMono16(xL_icon, iconY, iconW, iconH, ICON_PAUSE_16); // ⏸
-  BlitBitmapMono16(xC1_icon, iconY, iconW, iconH, ICON_CLK_16);  // ⏰
-  BlitBitmapMono16(xC2_icon, iconY, iconW, iconH, ICON_PAGE_16); // 📄
-  BlitBitmapMono16(xR_icon, iconY, iconW, iconH, ICON_SAVE_16);  // 💾
-
-  int y = kLineH;
-
-  // --------- Dummy rows to fill like HOLD list ---------
-  auto drawDottedHLine = [&](int y0, int thickness, int onLen, int offLen){
-    for (int t = 0; t < thickness; ++t) {
-      for (int x = 0; x < kScreenW; x += (onLen + offLen)) {
-        int x1 = x, x2 = x + onLen - 1; if (x2 >= kScreenW) x2 = kScreenW - 1;
-        paint.DrawFilledRectangle(x1, y0 + t, x2, y0 + t, COLORED);
-      }
-    }
-  };
-  auto drawDottedVLine = [&](int x0, int thickness, int onLen, int offLen){
-    for (int t = 0; t < thickness; ++t) {
-      for (int yy = 0; yy < kLineH; yy += (onLen + offLen)) {
-        int y1 = yy, y2 = yy + onLen - 1; if (y2 >= kLineH) y2 = kLineH - 1;
-        paint.DrawFilledRectangle(x0 + t, y1, x0 + t, y2, COLORED);
-      }
-    }
-  };
-
-  const int kSepThickness = 1;
-  const int kDotThickness = 1;
-  const int kDotOn  = 4;
-  const int kDotOff = 3;
-
-  const int left = 5;
-  const int pad  = 4;
-  const int spaceAfterDot = fw;
-
-  const int col1ch = 7;   // callsign
-  const int col2ch = 7;   // distance
-  const int col3ch = 5;   // direction
-
-  int x1_text = left;
-  int x1_line = x1_text + col1ch * fw + pad;
-  int x2_text = x1_line + spaceAfterDot;
-  int x2_line = x2_text + col2ch * fw + pad;
-  int x3_text = x2_line + spaceAfterDot;
-  int x3_line = x3_text + col3ch * fw + pad;
-  int x4_text = x3_line + spaceAfterDot;
-
-  struct Row { const char* model; const char* cs; float dist; int brg; const char* country; };
-  Row demo[5] = {
-    {"Boeing 787-9",    "ETD12",  31.2f,  88, "United Arab Emirates"},
-    {"Airbus A321neo",  "BAW102", 54.7f, 210, "United Kingdom"},
-    {"B737-800",        "KLM47",  78.1f, 320, "Netherlands"},
-    {"A320-232",        "QTR7",   22.4f, 145, "Qatar"},
-    {"C172",            "—",       5.6f, 278, "United States"},
-  };
-
-  for (int i = 0; i < 5; ++i) {
-    // Model band
-    paint.Clear(UNCOLORED);
-    if (i > 0) paint.DrawFilledRectangle(0, 0, kScreenW - 1, 0, COLORED);
-    paint.DrawStringAt(left, 5, demo[i].model, &Font16, COLORED);
-    drawDottedHLine(kLineH - 1, kDotThickness, kDotOn, kDotOff);
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
-    y += kLineH;
-
-    // Info band
-    paint.Clear(UNCOLORED);
-
-    char csPadded[8];
-    const char* cs = (demo[i].cs && demo[i].cs[0] && demo[i].cs[0] != 0xE2) ? demo[i].cs : "ABC123";
-    snprintf(csPadded, sizeof(csPadded), "%-7.7s", cs);
-
-    char distStr[10]; snprintf(distStr, sizeof(distStr), "%4.1fkm", demo[i].dist);
-
-    int bInt = demo[i].brg % 360;
-    char brg[4]; snprintf(brg, sizeof(brg), "%3d", bInt);
-    char cd[3]; { static const char t8[8][3]={"N ","NE","E ","SE","S ","SW","W ","NW"};
-                  int idx=(int)lroundf((float)bInt/45.0f); if(idx==8) idx=0; cd[0]=t8[idx][0]; cd[1]=t8[idx][1]; cd[2]='\0'; }
-    char dirStr[8]; snprintf(dirStr, sizeof(dirStr), "%s%s", brg, cd);
-
-    const int rightPad = 5;
-    int maxCountryPx = kScreenW - rightPad - x4_text;
-    int maxCountryCh = (maxCountryPx > 0) ? (maxCountryPx / fw) : 0;
-    char countryBuf[32];
-    shortenCountryForWidth(demo[i].country, countryBuf, sizeof(countryBuf), maxCountryCh);
-
-    if (x1_line < kScreenW) drawDottedVLine(x1_line, kDotThickness, kDotOn, kDotOff);
-    if (x2_line < kScreenW) drawDottedVLine(x2_line, kDotThickness, kDotOn, kDotOff);
-    if (x3_line < kScreenW) drawDottedVLine(x3_line, kDotThickness, kDotOn, kDotOff);
-
-    paint.DrawStringAt(x1_text, 5, csPadded,   &Font16, COLORED);
-    paint.DrawStringAt(x2_text, 5, distStr,    &Font16, COLORED);
-    paint.DrawStringAt(x3_text, 5, dirStr,     &Font16, COLORED);
-    paint.DrawStringAt(x4_text, 5, countryBuf, &Font16, COLORED);
-
-    paint.DrawFilledRectangle(0, kLineH - 1, kScreenW - 1, kLineH - 1, COLORED);
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y + kLineH);
-    y += kLineH;
-  }
-
-  // clear any remainder
-  while (y < kScreenH) {
-    int y2 = y + kLineH; if (y2 > kScreenH) y2 = kScreenH;
-    paint.Clear(UNCOLORED);
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, y, kScreenW, y2);
-    y = y2;
-  }
-
-  epd.TurnOnDisplay_Partial();
-#endif
-}

@@ -139,15 +139,7 @@ void setup() {
   // Create cache & display mutexes BEFORE any fetch/draw
   initCacheMutex();
   initDisplayMutex();
-//  epd.Init();
-//  epd.Clear();
-//  full_paint = Paint(full_image, 400, 300);
 
-// // Show a dummy live page at boot for 2s, then carry on
-// debugShowDummyLiveBoot();
-// //debugShowDummyHoldBoot();
-// //drawHoldPagePartial();
-// delay(2000);
   // Start fetch task with larger stack (avoid canary in WiFi/json work)
   xTaskCreatePinnedToCore(
     fetchTask,

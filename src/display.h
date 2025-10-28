@@ -45,5 +45,3 @@ int  getActiveCount();
 void ensurePartialPrimed();
 bool hasActiveAircraft();
 void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraft);
-void debugShowDummyLiveBoot();
-void debugShowDummyHoldBoot();
