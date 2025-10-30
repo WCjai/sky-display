@@ -1060,6 +1060,124 @@ static void DrawFilledPill(Paint& p, int x, int y, int w, int h, int color) {
   }
 }
 
+// ========== FAST overlay helpers (paint-only; single EPD push) ==========
+static inline void PaintDottedH(Paint& p, int x, int y, int w, int thickness, int onLen, int offLen) {
+  if (w <= 0 || thickness <= 0) return;
+  for (int xi = 0; xi < w; ) {
+    int on = std::min(onLen, w - xi);
+    p.DrawFilledRectangle(x + xi, y, x + xi + on - 1, y + thickness - 1, COLORED);
+    xi += on + offLen;
+  }
+}
+
+static inline void PaintDottedV(Paint& p, int x, int y, int h, int thickness, int onLen, int offLen) {
+  if (h <= 0 || thickness <= 0) return;
+  for (int yi = 0; yi < h; ) {
+    int on = std::min(onLen, h - yi);
+    p.DrawFilledRectangle(x, y + yi, x + thickness - 1, y + yi + on - 1, COLORED);
+    yi += on + offLen;
+  }
+}
+
+// Dashed diagonal drawn entirely into 'p' (RAM). Thickness = 1 px.
+static inline void PaintDashedDiag(Paint& p, int x0, int y0, int x1, int y1, int onLen, int offLen) {
+  int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+  int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+  int err = dx + dy;
+
+  int dashRemain = onLen;  // remaining pixels in current ON/OFF segment
+  bool on = true;
+
+  auto stepDash = [&](){
+    if (--dashRemain <= 0) {
+      on = !on;
+      dashRemain = on ? onLen : offLen;
+    }
+  };
+
+  while (true) {
+    if (on) p.DrawFilledRectangle(x0, y0, x0, y0, COLORED); // 1px
+    stepDash();
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+
+// Draws dotted square + dashed X into a temporary paint buffer, then single push.
+// - Diagonals start at the exact corners
+// - Adds a small solid core at the intersection for a proper cross
+// Draws dotted square + dashed X into a temporary paint buffer, then single push.
+// - Diagonals start at the exact corners
+// - No center square (optional 1px dot can be enabled via CROSS_CENTER_DOT)
+static void drawEmptySpaceOverlay_Fast(int emptyTopY, int emptyBottomY) {
+  // Same dotted style as rows
+  const int onLen = 4, offLen = 3, thickness = 1;
+
+  // Keep off row borders a bit
+  const int marginX = 12;
+  const int marginY = 8;
+
+  // Height of the empty strip
+  int overlayH = emptyBottomY - emptyTopY;
+  if (overlayH <= 0) return;
+  if (overlayH < 36) return;  // too small to look nice
+
+  // Prepare 'paint' as an overlay buffer the size of the empty strip
+  const int overlayW8 = (kScreenW + 7) & ~7;
+  int oldW = paint.GetWidth(), oldH = paint.GetHeight();
+  paint.SetWidth(overlayW8);
+  paint.SetHeight(overlayH);
+  paint.Clear(UNCOLORED);
+
+  // Local coords inside this buffer
+  const int leftX  = marginX;
+  const int rightX = kScreenW - marginX - 1;
+  const int topY   = marginY;
+  const int botY   = overlayH - marginY - 1;
+
+  // Sane room check
+  if (rightX - leftX < 20 || botY - topY < 20) {
+    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, emptyTopY, kScreenW, emptyBottomY);
+    paint.SetWidth(oldW); paint.SetHeight(oldH);
+    return;
+  }
+
+  // -------- Dotted square outline (square corners) --------
+  // Top / Bottom
+  PaintDottedH(paint, leftX,  topY,  rightX - leftX + 1, thickness, onLen, offLen);
+  PaintDottedH(paint, leftX,  botY,  rightX - leftX + 1, thickness, onLen, offLen);
+  // Left / Right
+  PaintDottedV(paint, leftX,  topY,  botY - topY + 1,    thickness, onLen, offLen);
+  PaintDottedV(paint, rightX, topY,  botY - topY + 1,    thickness, onLen, offLen);
+
+  // -------- Dashed 'X' starting at the EXACT corners --------
+  // TL -> BR
+  PaintDashedDiag(paint, leftX,  topY,  rightX, botY, onLen, offLen);
+  // BL -> TR
+  PaintDashedDiag(paint, leftX,  botY,  rightX, topY, onLen, offLen);
+
+  // Optional: 1px center dot to guarantee a clean "meet" (OFF by default)
+  #define CROSS_CENTER_DOT 0
+  #if CROSS_CENTER_DOT
+    {
+      const int cx = (leftX + rightX) / 2;
+      const int cy = (topY  + botY ) / 2;
+      paint.DrawFilledRectangle(cx, cy, cx, cy, COLORED);
+    }
+  #endif
+
+  // Single partial push for the whole empty region
+  epd.Display_Partial_Not_refresh(paint.GetImage(), 0, emptyTopY, kScreenW, emptyBottomY);
+
+  // restore paint
+  paint.SetWidth(oldW);
+  paint.SetHeight(oldH);
+}
+
+
+
 
 
 // -------- LIVE (batched partial, single refresh) --------
@@ -1300,15 +1418,33 @@ void drawAircraftInfoToDisplay_Partial(const char* timeStr, int totalAircraftFro
     if (gHoldRequested) return;
   }
 
-  // Clear leftovers
+
+  // Clear leftovers (blank any unused 27px bands) with one push per band
   for (int i = linesUsed; i < maxLines; i++) {
     paint.Clear(UNCOLORED);
-    epd.Display_Partial_Not_refresh(paint.GetImage(), 0, i * kLineH, kScreenW, (i + 1) * kLineH);
+    epd.Display_Partial_Not_refresh(
+        paint.GetImage(),
+        0,
+        i * kLineH,
+        kScreenW,
+        (i + 1) * kLineH
+    );
     yield();
     if (gHoldRequested) return;
   }
 
+  // Draw fast dotted box + dashed X in the remaining empty strip (single push)
+  {
+    int emptyTopY    = linesUsed * kLineH;
+    int emptyBottomY = kScreenH;
+    if (emptyBottomY > emptyTopY) {
+      drawEmptySpaceOverlay_Fast(emptyTopY, emptyBottomY);
+    }
+  }
+
+  // Final partial refresh
   if (!gHoldRequested) epd.TurnOnDisplay_Partial();
+
 }
 
 
