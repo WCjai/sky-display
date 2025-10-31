@@ -7,10 +7,10 @@ struct BoundingBox { float south, north, west, east; };
 BoundingBox getBoundingBox(float centerLat, float centerLon, int zoom);
 
 /**
- * Fetches an aircraft model string for a given ICAO24, trying (in order):
- *   HexDB → OpenSky meta → PlaneSpotters → ADSB.one(desc/t)
- * If all fail (Unknown) and callsignOpt is provided, it will call ADSBdb
- *   to fetch airline.name and use that as the model text.
+ * Fetches an aircraft model string for a given ICAO24.
+ * The resolver consults the cache first, then walks a retry-aware pipeline:
+ *   HexDB → OpenSky meta → PlaneSpotters → ADSB.one(desc/t) → ADSBdb (airline name)
+ * Each provider is rate-limited, honours backoff, and negative results expire quickly.
  *
  * NOTE: Never caches "Unknown" (so later cycles can enrich).
  */
