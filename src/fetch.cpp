@@ -74,7 +74,7 @@
 static const size_t ROUTE_MAX_ENTRIES    = 512;
 static const size_t CALLSIGN_MAX_ENTRIES = 512;
 static const size_t AIRLINE_MAX_ENTRIES  = 512;
-
+static constexpr int MAX_MODEL_CHARS = 36;
 // Pruning cadence
 static uint32_t gLastPruneMs = 0;
 
@@ -158,6 +158,12 @@ static String ellipsize(const String& s, int maxChars) {
   return cut;
 }
 
+// Uppercase & trim ICAO type (e.g., "B738")
+static String normalizeIcaoType(const String& in) {
+  String s = in; s.trim(); s.toUpperCase();
+  return s;
+}
+
 static String normalizeManufacturer(const String& in) {
   String s = in; 
   s.trim();
@@ -169,6 +175,53 @@ static String normalizeManufacturer(const String& in) {
   }
   return s;
 }
+
+// Build label using your requested priority list, clipped to width
+// Priority order (first that fits within maxChars):
+// 1) airline + manufacturer + type
+// 2) airline + manufacturer + icao_type
+// 3) airline + icao_type
+// 4) manufacturer + type
+// 5) manufacturer + icao_type
+// 6) airline
+static String composeModelLabelPriority(String airline,
+                                        String manufacturer,
+                                        String type,
+                                        String icao_type,
+                                        int maxChars = MAX_MODEL_CHARS)
+{
+  airline.trim(); manufacturer.trim(); type.trim(); icao_type = normalizeIcaoType(icao_type);
+  manufacturer = normalizeManufacturer(manufacturer);
+
+  struct Cand { String a,b,c; };
+  Cand seq[] = {
+    { airline,      manufacturer, type      },  // 1
+    { airline,      manufacturer, icao_type },  // 2
+    { airline,      "",           icao_type },  // 3
+    { manufacturer, "",           type      },  // 4
+    { manufacturer, "",           icao_type },  // 5
+    { airline,      "",           ""        },  // 6
+  };
+
+  for (const auto& c : seq) {
+    String s = join3(c.a, c.b, c.c);
+    s.trim();
+    if (!s.length()) continue;
+    if ((int)s.length() <= maxChars) return s;
+  }
+
+  // Nothing fit exactly → ellipsize the highest-value candidate that has content.
+  // Try in priority order again, but ellipsize.
+  for (const auto& c : seq) {
+    String s = join3(c.a, c.b, c.c);
+    s.trim();
+    if (!s.length()) continue;
+    return ellipsize(s, maxChars);
+  }
+  return "";
+}
+
+
 
 // Lookup the last label we rendered for this ICAO (from aircraftCache)
 static String lookupCachedDisplayLabelByIcao(const String& icao24) {
@@ -307,7 +360,7 @@ static String fetchFromPlaneSpotters(const String& icao24) {
   DBG_HTTP("[HTTP] <- %d (PlaneSpotters)\n", code);
   if (code == 200) {
     String payload = http.getString();
-    StaticJsonDocument<8192> doc; // safe headroom
+    JsonDocument doc; // safe headroom
     if (!deserializeJson(doc, payload)) {
       JsonArray photos = doc["photos"].as<JsonArray>();
       if (!photos.isNull() && photos.size() > 0) {
@@ -347,7 +400,7 @@ static String fetchFromOpenSkyMeta(const String& icao24, OpenSkyAuthClient& auth
   DBG_HTTP("[HTTP] <- %d (OpenSky meta)\n", code);
   if (code == 200) {
     String payload = http.getString();
-    StaticJsonDocument<4096> doc;
+    JsonDocument doc;
     if (!deserializeJson(doc, payload)) {
       String model = doc["model"] | "";
       String oper  = doc["operator"] | "";
@@ -376,7 +429,7 @@ static String fetchFromHexDB(const String& icao24) {
   int code = http.GET();
   DBG_HTTP("[HTTP] <- %d (HexDB)\n", code);
   if (code == 200) {
-    StaticJsonDocument<6144> doc;
+    JsonDocument doc;
     DeserializationError err = deserializeJson(doc, http.getStream());
     http.end();
     if (!err) {
@@ -469,7 +522,7 @@ static String fetchCallsignFromADSBOne(const String& icao24) {
   DBG_HTTP("[HTTP] <- %d (ADSB.one callsign)\n", code);
   if (code != 200) { http.end(); cacheCallsign(hex, ""); return ""; }
 
-  StaticJsonDocument<8192> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) { cacheCallsign(hex, ""); DBG_ROUTE("[ROUTE] callsign JSON error\n"); return ""; }
@@ -496,7 +549,7 @@ static String fetchModelFromADSBOneDesc(const String& icao24) {
   DBG_HTTP("[HTTP] <- %d (ADSB.one model)\n", code);
   if (code != 200) { http.end(); return ""; }
 
-  StaticJsonDocument<8192> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) { DBG_MODEL("[MODEL] ADSB1 JSON error\n"); return ""; }
@@ -548,7 +601,7 @@ static String fetchRouteLabelForCallsign(String callsign) {
   DBG_HTTP("[HTTP] <- %d (ADSBdb)\n", code);
   if (code != 200) { http.end(); cacheRoute(callsign, ""); return ""; }
 
-  StaticJsonDocument<4096> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) { cacheRoute(callsign, ""); DBG_ROUTE("[ROUTE] ADSBdb JSON error\n"); return ""; }
@@ -586,7 +639,7 @@ static String fetchAirlineNameFromADSBdb(String callsign) {
   DBG_HTTP("[HTTP] <- %d (ADSBdb airline)\n", code);
   if (code != 200) { http.end(); cacheAirline(callsign, ""); return ""; }
 
-  StaticJsonDocument<4096> doc;
+  JsonDocument doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
   if (err) { cacheAirline(callsign, ""); DBG_MODEL("[MODEL] ADSBdb airline JSON error\n"); return ""; }
@@ -596,6 +649,51 @@ static String fetchAirlineNameFromADSBdb(String callsign) {
   cacheAirline(callsign, name);
   if (name.length()) DBG_MODEL("[MODEL] ADSBdb airline '%s' for %s\n", name.c_str(), callsign.c_str());
   return name;
+}
+
+// ADSBdb aircraft endpoint: https://api.adsbdb.com/v0/aircraft/{icao24}
+// Returns manufacturer, type, icao_type (uppercase)
+static bool fetchAircraftFieldsFromADSBdb(const String& icao24,
+                                          String& outManufacturer,
+                                          String& outType,
+                                          String& outIcaoType)
+{
+  // Reuse ADSBdb token bucket (same domain as callsign/route)
+  if (!allowRouteCall()) return false;
+
+  HTTPClient http;
+  http.setTimeout(API_TIMEOUT_MS);
+  String hexU = icao24; hexU.toUpperCase();
+  String url = "https://api.adsbdb.com/v0/aircraft/" + hexU;
+  DBG_HTTP("[HTTP] GET %s\n", url.c_str());
+  http.begin(url);
+  int code = http.GET();
+  DBG_HTTP("[HTTP] <- %d (ADSBdb aircraft)\n", code);
+  if (code != 200) { http.end(); return false; }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getStream());
+  http.end();
+  if (err) {
+    DBG_MODEL("[MODEL] ADSBdb aircraft JSON error\n");
+    return false;
+  }
+
+  JsonObject ac = doc["response"]["aircraft"];
+  if (ac.isNull()) return false;
+
+  String manufacturer = (const char*)(ac["manufacturer"]   | "");
+  String type         = (const char*)(ac["type"]           | "");
+  String icaoType     = (const char*)(ac["icao_type"]      | "");
+
+  manufacturer.trim(); type.trim(); icaoType.trim();
+  outManufacturer = manufacturer;
+  outType         = type;
+  outIcaoType     = icaoType;
+
+  DBG_MODEL("[MODEL] ADSBdb aircraft fields: manuf='%s' type='%s' icao='%s'\n",
+            outManufacturer.c_str(), outType.c_str(), outIcaoType.c_str());
+  return (outManufacturer.length() || outType.length() || outIcaoType.length());
 }
 
 static bool modelFetchAllowed() { return (int32_t)(gModelFailUntilMs - millis()) <= 0; }
@@ -623,23 +721,21 @@ static String bestFlightLabel(const String& icao24, const String& callsignIn) {
 
 // ---------------- Public: aircraft model (with airline-name fallback) ----------------
 String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth, const String& callsignOpt) {
-  // 0) If we already have a good one, use it
+  // 0) Cached?
   String cached = lookupCachedModel(icao24);
   if (isMeaningfulModel(cached)) {
     DBG_MODEL("[MODEL] cache hit %s -> '%s'\n", icao24.c_str(), cached.c_str());
     return cached;
   }
 
-  // If we recently failed across providers, skip hitting them this tick
   if (!modelFetchAllowed()) {
     DBG_MODEL("[MODEL] backoff active; returning cached/Unknown for %s\n", icao24.c_str());
     if (isMeaningfulModel(cached)) return cached;
-    // still allow airline fallback if we have callsign (cheap)
+    // still try cheap airline name in backoff mode
     if (callsignOpt.length()) {
       String cs = callsignOpt; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
       String airline = fetchAirlineNameFromADSBdb(cs);
       if (isMeaningfulModel(airline)) {
-        // FIX: provide all 6 args (callsign, country empty; dist/bearing -1)
         addToCache(icao24, airline, "", "", -1, -1);
         return airline;
       }
@@ -647,7 +743,7 @@ String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth, const S
     return "Unknown";
   }
 
-  // 1) Try providers in strict order
+  // 1) Normal provider order (existing)
   String model = fetchFromHexDB(icao24);
   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=HexDB   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
 
@@ -660,26 +756,45 @@ String fetchAircraftModel(const String& icao24, OpenSkyAuthClient& auth, const S
   model = fetchModelFromADSBOneDesc(icao24);
   if (isMeaningfulModel(model)) { DBG_MODEL("[MODEL] win=ADSB1   %s -> '%s'\n", icao24.c_str(), model.c_str()); goto WIN; }
 
-  // 2) Last-ditch: if still unknown but callsign is known, use airline.name
-  if (callsignOpt.length()) {
-    String cs = callsignOpt; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
-    if (cs.length()) {
-      String airline = fetchAirlineNameFromADSBdb(cs);
-      if (isMeaningfulModel(airline)) {
-        DBG_MODEL("[MODEL] win=ADSBdb-airline %s -> '%s'\n", icao24.c_str(), airline.c_str());
-        addToCache(icao24, airline, "", "", -1, -1);
-        return airline;
+  // 2) NEW: Before pure airline fallback, try ADSBdb aircraft fields
+  {
+    String mfr, typ, icao;
+    bool gotAircraft = fetchAircraftFieldsFromADSBdb(icao24, mfr, typ, icao);
+
+    // We can also ask for airline (cheap) if callsign available
+    String airline;
+    if (callsignOpt.length()) {
+      String cs = callsignOpt; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
+      airline = fetchAirlineNameFromADSBdb(cs);
+    }
+
+    if (gotAircraft || airline.length()) {
+      String composed = composeModelLabelPriority(airline, mfr, typ, icao, MAX_MODEL_CHARS);
+      if (isMeaningfulModel(composed)) {
+        DBG_MODEL("[MODEL] win=ADSBdb aircraft compose %s -> '%s'\n", icao24.c_str(), composed.c_str());
+        addToCache(icao24, composed, "", "", -1, -1);
+        return composed;
       }
     }
   }
 
-  // 3) Everything failed → set explicit non-empty Unknown (do NOT cache)
+  // 3) Last-ditch: airline-only (what you had before)
+  if (callsignOpt.length()) {
+    String cs = callsignOpt; cs.trim(); cs.replace(" ", ""); cs.toUpperCase();
+    String airline = fetchAirlineNameFromADSBdb(cs);
+    if (isMeaningfulModel(airline)) {
+      DBG_MODEL("[MODEL] win=ADSBdb-airline %s -> '%s'\n", icao24.c_str(), airline.c_str());
+      addToCache(icao24, airline, "", "", -1, -1);
+      return airline;
+    }
+  }
+
+  // 4) Everything failed → brief backoff and "Unknown"
   DBG_MODEL("[MODEL] all providers failed for %s -> 'Unknown'\n", icao24.c_str());
-  gModelFailUntilMs = millis() + 15000UL; // brief backoff
+  gModelFailUntilMs = millis() + 15000UL;
   return "Unknown";
 
 WIN:
-  // Cache the real model (not Unknown)
   addToCache(icao24, model, "", "", -1, -1);
   return model;
 }
@@ -830,7 +945,7 @@ void fetchOpenSkyDataWithBoundingBox(float centerLat, float centerLon, int zoom,
   }
 
   // Parse JSON (large)
-  DynamicJsonDocument doc(128 * 1024); // adjust to your RAM; or use filters
+  JsonDocument doc; // adjust to your RAM; or use filters
   DeserializationError jerr = deserializeJson(doc, http.getStream());
   if (jerr) {
     Serial.printf("[fetch] JSON error: %s\n", jerr.c_str());
